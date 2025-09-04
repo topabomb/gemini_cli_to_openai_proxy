@@ -10,9 +10,9 @@ import os
 from typing import Any, Dict, List, Optional
 
 
-# ===== 硬编码 OAuth 配置（按要求保留在代码中） =====
-CLIENT_ID = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-CLIENT_SECRET = "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"
+# ===== 硬编码 OAuth 配置 =====
+CLIENT_ID = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"# Google OAuth 2.0 客户端 ID (Client ID)
+CLIENT_SECRET = "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" # Google OAuth 2.0 客户端密钥 (Client Secret)
 SCOPES: List[str] = [
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
