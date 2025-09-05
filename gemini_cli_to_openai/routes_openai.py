@@ -92,6 +92,7 @@ async def openai_chat_completions(
 
         async def openai_stream_generator():
             response_id = "chatcmpl-" + str(uuid.uuid4())
+            has_sent_valid_chunk = False
             try:
                 # 注意：gemini_payload 现在直接包含了所有需要的信息
                 response = api_client.send_gemini_request(
@@ -141,6 +142,7 @@ async def openai_chat_completions(
                         )
                         # 仅当转换后的块包含有效内容时才发送
                         if openai_chunk and openai_chunk.get("choices"):
+                            has_sent_valid_chunk = True
                             yield f"data: {json.dumps(openai_chunk)}\n\n"
                     except json.JSONDecodeError:
                         logging.warning(
@@ -150,6 +152,9 @@ async def openai_chat_completions(
 
                 # 确保流的末尾发送 [DONE]
                 yield "data: [DONE]\n\n"
+
+                if not has_sent_valid_chunk:
+                    logging.warning(f"OpenAI stream for model {oa_req.model} finished without sending any valid data chunks to the client.")
 
             except Exception as e:
                 logging.error(f"Streaming failed: {e}")

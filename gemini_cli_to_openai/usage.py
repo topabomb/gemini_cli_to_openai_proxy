@@ -20,12 +20,19 @@ class ModelStats:
     """每个模型的用量统计"""
 
     successful_requests: int = 0
+    """成功请求的次数"""
     total_tokens: int = 0
+    """总 Token 消耗（Prompt + Candidates + Thoughts）"""
     prompt_tokens: int = 0
+    """输入（提示词）消耗的 Token 数量"""
     candidates_tokens: int = 0
+    """模型生成输出（候选回复）消耗的 Token 数量"""
     thoughts_tokens: int = 0
+    """模型内部思考/推理消耗的 Token 数量（Gemini 特有）"""
     cached_content_token_count: int = 0
+    """使用缓存内容消耗的 Token 数量"""
     failed_requests: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    """失败请求的统计，按失败原因分类"""
 
 
 def _format_human_readable(num: int) -> str:
@@ -183,7 +190,38 @@ class UsageTracker:
                                     f"      - {key.replace('_', ' ').title()}: {formatted_value}"
                                 )
 
-            report_lines.append("=" * 60)
+            # 按模型汇总用量
+            model_summary_stats: DefaultDict[str, ModelStats] = defaultdict(ModelStats)
+            for auth_stats in current_stats_dict.values():
+                for cred_stats in auth_stats.values():
+                    for model_name, stats_dict in cred_stats.items():
+                        model_summary_stats[model_name].successful_requests += stats_dict.get("successful_requests", 0)
+                        model_summary_stats[model_name].total_tokens += stats_dict.get("total_tokens", 0)
+                        model_summary_stats[model_name].prompt_tokens += stats_dict.get("prompt_tokens", 0)
+                        model_summary_stats[model_name].candidates_tokens += stats_dict.get("candidates_tokens", 0)
+                        model_summary_stats[model_name].thoughts_tokens += stats_dict.get("thoughts_tokens", 0)
+                        for reason, count in stats_dict.get("failed_requests", {}).items():
+                            model_summary_stats[model_name].failed_requests[reason] += count
+
+            if model_summary_stats:
+                report_lines.append("\n" + "=" * 60)
+                report_lines.append("Usage Summary by Model:")
+                report_lines.append("=" * 60)
+                for model_name in sorted(model_summary_stats.keys()):
+                    model_stats = model_summary_stats[model_name]
+                    failed_str = ""
+                    if model_stats.failed_requests:
+                        failed_reasons = ", ".join([f"{reason.title()}: {count}" for reason, count in sorted(model_stats.failed_requests.items())])
+                        failed_str = f", Failed: [{failed_reasons}]"
+                    report_lines.append(
+                        f"  Model: {model_name}, Requests: {model_stats.successful_requests}, "
+                        f"Total Tokens: {_format_human_readable(model_stats.total_tokens)}, "
+                        f"Prompt: {_format_human_readable(model_stats.prompt_tokens)}, "
+                        f"Candidates: {_format_human_readable(model_stats.candidates_tokens)}, "
+                        f"Thoughts: {_format_human_readable(model_stats.thoughts_tokens)}{failed_str}"
+                    )
+                report_lines.append("=" * 60)
+
             logging.info("\n".join(report_lines))
 
             self._last_logged_stats = current_stats_dict

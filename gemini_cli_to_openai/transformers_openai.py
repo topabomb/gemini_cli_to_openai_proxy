@@ -162,8 +162,12 @@ def gemini_response_to_openai(
         Dict[str, Any]: 一个符合 OpenAI 聊天补全响应格式的字典。
     """
     choices = []
+    candidates = gemini_response.get("candidates", [])
+    if not candidates:
+        logging.warning(f"Gemini response for model {model} contains no candidates. Original response: {gemini_response}")
+
     # 遍历所有候选响应
-    for candidate in gemini_response.get("candidates", []):
+    for candidate in candidates:
         # 处理角色映射
         role = candidate.get("content", {}).get("role", "assistant")
         if role == "model":
@@ -195,6 +199,9 @@ def gemini_response_to_openai(
                 "finish_reason": _map_finish_reason(candidate.get("finishReason")),
             }
         )
+
+    if not choices:
+        logging.warning(f"Failed to extract any valid choices from Gemini candidates for model {model}. Original candidates: {candidates}")
 
     # 构建并返回最终的 OpenAI 响应
     return {
