@@ -1,5 +1,5 @@
 """
-程序入口：读取当前工作目录下的 config.json，装配并启动服务。
+程序入口：读取指定的配置文件或加载默认配置，装配并启动服务。
 """
 import json
 import logging
@@ -15,7 +15,7 @@ def main():
     parser.add_argument(
         "-c", "--config",
         type=str,
-        help="Path to the configuration JSON file (default: config.json in current directory)."
+        help="Path to the configuration JSON file ."
     )
     args = parser.parse_args()
 

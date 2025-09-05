@@ -193,16 +193,15 @@ def is_maxthinking_model(model_name: str) -> bool:
 def get_thinking_budget(model_name: str) -> int:
     base_model = get_base_model_name(model_name)
     if is_nothinking_model(model_name):
-        if "gemini-2.5-flash" in base_model:
-            return 0
-        elif "gemini-2.5-pro" in base_model:
-            return 128
+        # Both gemini-2.5-flash and gemini-2.5-pro should return 0 for -nothinking variant
+        return 0
     elif is_maxthinking_model(model_name):
         if "gemini-2.5-flash" in base_model:
             return 24576
         elif "gemini-2.5-pro" in base_model:
             return 32768
     else:
+        # Return -1 to indicate default budget, which should be omitted in the request
         return -1
     return -1
 

@@ -95,7 +95,7 @@ python -m gemini_cli_to_openai -c /path/to/your/config.json
 
 本项目支持多种 Gemini 模型及其变体。
 
-### 基础模型 (Base Models)
+### 支持的模型
 
 - `gemini-2.5-pro-preview-05-06`
 - `gemini-2.5-pro-preview-06-05`
@@ -104,13 +104,13 @@ python -m gemini_cli_to_openai -c /path/to/your/config.json
 - `gemini-2.5-flash-preview-04-17`
 - `gemini-2.5-flash`
 
-### 模型变体 (Variants)
-
-通过在基础模型名称后添加特定后缀，可以调用模型的不同变体：
+对于上述每个基础模型，还支持以下变体：
 
 - **`-search`**: 启用 Google Search 工具。例如 `gemini-2.5-pro-search`。
 - **`-nothinking`**: 禁用推理（Thinking）功能。例如 `gemini-2.5-pro-nothinking`。
 - **`-maxthinking`**: 启用最大推理（Thinking）预算。例如 `gemini-2.5-pro-maxthinking`。
+
+在日志中打印的基础模型列表会包含这些变体。
 
 ## 工作原理 (How It Works)
 

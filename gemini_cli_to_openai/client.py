@@ -201,7 +201,7 @@ class ApiClient:
             cred_id = managed.id
 
         final_payload = {
-            "model": payload.get("model"),
+            "model": get_base_model_name(model),
             "project": proj_id,
             "request": payload.get("request", {}),
         }

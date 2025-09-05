@@ -14,6 +14,7 @@ OpenAI 与 Google Gemini API 数据格式转换器模块。
 
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Dict, Any, Optional, cast
@@ -32,10 +33,11 @@ def openai_request_to_gemini(openai_request) -> Dict[str, Any]:
     将 OpenAI 格式的聊天补全请求转换为 Google Gemini API 所需的请求格式。
 
     此函数会处理以下转换：
-    1. 消息角色映射：OpenAI 的 "assistant" 映射为 Gemini 的 "model"，"system" 映射为 "user"。
-    2. 消息内容：支持文本和 base64 编码的图片 URL。
-    3. 生成配置：将 OpenAI 的参数（如 temperature, max_tokens 等）映射到 Gemini 的 generationConfig。
-    4. 模型变体：根据模型名称（如 -search, -nothinking）添加相应的工具和思考配置。
+    1. 消息角色映射：OpenAI 的 "assistant" 映射为 Gemini 的 "model"。
+    2. System 消息处理：将 OpenAI 的 "system" 消息抽取到 Gemini 的 "systemInstruction" 字段。
+    3. 消息内容：支持文本和 base64 编码的图片 URL。
+    4. 生成配置：将 OpenAI 的参数（如 temperature, max_tokens 等）映射到 Gemini 的 generationConfig。
+    5. 模型变体：根据模型名称（如 -search, -nothinking）添加相应的工具和思考配置。
 
     Args:
         openai_request: 一个类似 OpenAI 请求结构的对象，应包含 messages, model, temperature 等属性。
@@ -44,6 +46,7 @@ def openai_request_to_gemini(openai_request) -> Dict[str, Any]:
         Dict[str, Any]: 一个符合 Google Gemini API 规范的请求负载字典。
     """
     contents = []
+    system_messages = []
 
     # 转换消息内容和角色
     for message in openai_request.messages:
@@ -51,22 +54,26 @@ def openai_request_to_gemini(openai_request) -> Dict[str, Any]:
         if role == "assistant":
             role = "model"
         elif role == "system":
-            role = "user"
+            # 收集所有 system 消息
+            if isinstance(message.content, str):
+                system_messages.append(message.content)
+            continue  # 不将 system 消息添加到 contents
 
         if isinstance(message.content, list):
             # 处理多模态内容（文本和图片）
             parts = []
             for part in message.content:
-                if part.get("type") == "text":
-                    parts.append({"text": part.get("text", "")})
-                elif part.get("type") == "image_url":
-                    image_url = part.get("image_url", {}).get("url")
+                # Pydantic 模型使用属性访问
+                if part.type == "text":
+                    parts.append({"text": getattr(part, 'text', "")})
+                elif part.type == "image_url":
+                    image_url = getattr(part.image_url, 'url', None) if part.image_url else None
                     if image_url:
-                        try:
-                            # 解析 base64 图片 URL
-                            mime_type, base64_data = image_url.split(";")
-                            _, mime_type = mime_type.split(":")
-                            _, base64_data = base64_data.split(",")
+                        # 使用正则表达式解析 base64 图片 URL，更健壮
+                        match = re.match(r"data:(?P<mime_type>.*?);base64,(?P<data>.*)", image_url)
+                        if match:
+                            mime_type = match.group("mime_type")
+                            base64_data = match.group("data")
                             parts.append(
                                 {
                                     "inlineData": {
@@ -75,8 +82,7 @@ def openai_request_to_gemini(openai_request) -> Dict[str, Any]:
                                     }
                                 }
                             )
-                        except ValueError:
-                            # 如果 URL 格式不正确，则记录警告并跳过
+                        else:
                             logging.warning(f"Skipping malformed image_url data URI: {image_url[:100]}...")
                             continue
             contents.append({"role": role, "parts": parts})
@@ -106,7 +112,8 @@ def openai_request_to_gemini(openai_request) -> Dict[str, Any]:
     if openai_request.seed is not None:
         generation_config["seed"] = openai_request.seed
     if openai_request.response_format is not None:
-        if openai_request.response_format.get("type") == "json_object":
+        # Pydantic 模型使用属性访问
+        if getattr(openai_request.response_format, 'type', None) == "json_object":
             generation_config["responseMimeType"] = "application/json"
 
     # 构建基础请求负载
@@ -114,8 +121,11 @@ def openai_request_to_gemini(openai_request) -> Dict[str, Any]:
         "contents": contents,
         "generationConfig": generation_config,
         "safetySettings": DEFAULT_SAFETY_SETTINGS,
-        "model": get_base_model_name(openai_request.model),
     }
+
+    # 如果有 system 消息，则合并并添加到请求负载
+    if system_messages:
+        request_payload["systemInstruction"] = {"parts": [{"text": "\n".join(system_messages)}]}
 
     # 为 search 模型变体添加 Google Search 工具
     if is_search_model(openai_request.model):
@@ -281,32 +291,6 @@ def _map_finish_reason(gemini_reason: str) -> Optional[str]:
     else:
         # 对于其他未知的结束原因，返回 None
         return None
-
-
-def build_gemini_payload_from_openai(openai_payload: dict) -> dict:
-    """
-    将 OpenAI 格式的请求负载转换为 Google Gemini API 所需的格式。
-
-    Args:
-        openai_payload (dict): 来自 OpenAI 兼容 API 的请求负载。
-
-    Returns:
-        dict: 适用于 Google Gemini API 的请求负载字典，包含 'model' 和 'request' 键。
-    """
-    model = openai_payload.get("model")
-    safety_settings = openai_payload.get("safetySettings", DEFAULT_SAFETY_SETTINGS)
-    request_data = {
-        "contents": openai_payload.get("contents"),
-        "systemInstruction": openai_payload.get("systemInstruction"),
-        "cachedContent": openai_payload.get("cachedContent"),
-        "tools": openai_payload.get("tools"),
-        "toolConfig": openai_payload.get("toolConfig"),
-        "safetySettings": safety_settings,
-        "generationConfig": openai_payload.get("generationConfig", {}),
-    }
-    # 移除值为 None 的键
-    request_data = {k: v for k, v in request_data.items() if v is not None}
-    return {"model": model, "request": request_data}
 
 
 def build_gemini_payload_from_native(

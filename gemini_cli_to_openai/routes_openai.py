@@ -6,15 +6,15 @@ import json
 import uuid
 import asyncio
 import logging
-from typing import Dict, Any, Union, cast
+from typing import Dict, Any, Union, cast, List, Optional
 from fastapi import APIRouter, Request, Response, Depends
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from .transformers_openai import (
     openai_request_to_gemini,
     gemini_response_to_openai,
     gemini_stream_chunk_to_openai,
-    build_gemini_payload_from_openai,
 )
 from .client import ApiClient
 from .auth import authenticate_request
@@ -22,6 +22,34 @@ from .state import api_client as api_client_state, settings as settings_state
 
 
 router = APIRouter()
+
+
+# Pydantic 模型用于请求体验证
+class ChatMessageContentPart(BaseModel):
+    type: str
+    text: Optional[str] = None
+    image_url: Optional[Dict[str, str]] = None
+
+class ChatMessage(BaseModel):
+    role: str
+    content: Union[str, List[ChatMessageContentPart]]
+
+class ResponseFormat(BaseModel):
+    type: str
+
+class ChatCompletionRequest(BaseModel):
+    model: str
+    messages: List[ChatMessage]
+    stream: bool = False
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    max_tokens: Optional[int] = None
+    stop: Optional[Union[str, List[str]]] = None
+    frequency_penalty: Optional[float] = None
+    presence_penalty: Optional[float] = None
+    n: Optional[int] = None
+    seed: Optional[int] = None
+    response_format: Optional[ResponseFormat] = None
 
 
 def _get_settings():
@@ -32,40 +60,18 @@ def _get_settings():
 
 
 @router.post("/v1/chat/completions")
-async def openai_chat_completions(request: Request):
+async def openai_chat_completions(
+    request: Request,
+    oa_req: ChatCompletionRequest,
+):
     settings, api_client = _get_settings()
     auth_key = authenticate_request(request, settings["auth_keys"])  # 鉴权
 
     try:
-        body = await request.json()
-
-        # 构造简单 pydantic-like 对象（避免引入新依赖）
-        class _Msg:
-            def __init__(self, d):
-                self.role = d.get("role")
-                self.content = d.get("content")
-
-        class _Req:
-            def __init__(self, d):
-                self.model = d.get("model")
-                self.messages = [_Msg(m) for m in d.get("messages", [])]
-                self.stream = d.get("stream", False)
-                self.temperature = d.get("temperature")
-                self.top_p = d.get("top_p")
-                self.max_tokens = d.get("max_tokens")
-                self.stop = d.get("stop")
-                self.frequency_penalty = d.get("frequency_penalty")
-                self.presence_penalty = d.get("presence_penalty")
-                self.n = d.get("n")
-                self.seed = d.get("seed")
-                self.response_format = d.get("response_format")
-
-        oa_req = _Req(body)
         logging.info(
             f"OpenAI chat completion request: model={oa_req.model}, stream={oa_req.stream}"
         )
-        gemini_request_data = openai_request_to_gemini(oa_req)
-        gemini_payload = build_gemini_payload_from_openai(gemini_request_data)
+        gemini_payload = openai_request_to_gemini(oa_req)
     except Exception as e:
         logging.error(f"Error processing OpenAI request: {e}")
         return Response(
@@ -87,8 +93,9 @@ async def openai_chat_completions(request: Request):
         async def openai_stream_generator():
             response_id = "chatcmpl-" + str(uuid.uuid4())
             try:
+                # 注意：gemini_payload 现在直接包含了所有需要的信息
                 response = api_client.send_gemini_request(
-                    auth_key, gemini_payload, is_streaming=True
+                    auth_key, {"model": oa_req.model, "request": gemini_payload}, is_streaming=True
                 )
                 if not isinstance(response, StreamingResponse):
                     # 如果不是流式响应，则尝试作为错误处理
@@ -123,7 +130,7 @@ async def openai_chat_completions(request: Request):
                         continue
 
                     chunk_data_str = chunk_str[len("data: ") :]
-                    if not chunk_data_str:
+                    if not chunk_data_str or chunk_data_str == "[DONE]":
                         continue
 
                     try:
@@ -162,8 +169,9 @@ async def openai_chat_completions(request: Request):
 
     else:  # 非流式
         try:
+            # 注意：gemini_payload 现在直接包含了所有需要的信息
             response = api_client.send_gemini_request(
-                auth_key, gemini_payload, is_streaming=False
+                auth_key, {"model": oa_req.model, "request": gemini_payload}, is_streaming=False
             )
             if not isinstance(response, Response) or response.status_code != 200:
                 # client.py 中已处理错误，此处直接返回
