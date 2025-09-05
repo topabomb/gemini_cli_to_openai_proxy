@@ -192,6 +192,7 @@ def get_thinking_budget(model_name: str) -> int:
             return 32768
     else:
         return -1
+    return -1
 
 
 def should_include_thoughts(model_name: str) -> bool:

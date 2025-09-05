@@ -109,7 +109,6 @@ def run_oauth_flow() -> Optional[Credentials]:
     print("Please open this URL in your browser to log in:")
     print(auth_url)
     print("="*80 + "\n")
-    logging.info(f"Please open this URL in your browser to log in: {auth_url}")
 
     # 等待回调（轮询 handle_request，带超时与日志）
     import time as _time

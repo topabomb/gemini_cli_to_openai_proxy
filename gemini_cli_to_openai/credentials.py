@@ -309,7 +309,7 @@ class CredentialManager:
                     for c in self.credentials:
                         if not c.credentials.expiry:
                             continue
-                        # 提前 60s 刷新（统一使用 naive UTC，避免 tz 混用）
+                        # 提前 600s 刷新（统一使用 naive UTC，避免 tz 混用）
                         try:
                             exp = c.credentials.expiry
                             if exp.tzinfo is not None:
@@ -317,7 +317,7 @@ class CredentialManager:
                         except Exception:
                             exp = c.credentials.expiry
                         now_naive = datetime.utcnow()
-                        if (exp - now_naive) < timedelta(seconds=60):
+                        if (exp - now_naive) < timedelta(seconds=600):
                             if c.credentials.refresh_token:
                                 self._refresh_credential(c)
                 self.stop_event.wait(self.refresh_interval_sec)

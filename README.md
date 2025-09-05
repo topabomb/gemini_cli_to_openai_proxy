@@ -120,7 +120,7 @@ python -m gemini_cli_to_openai -c /path/to/your/config.json
 
 - **持久化**: 凭据以简化格式（`access_token`, `refresh_token`, `token_type`, `expiry_date`）存储在 JSON 文件中。支持单个对象或对象数组格式，并根据 `refresh_token` 进行去重合并。
 - **加载与初始化**: 启动时加载凭据，并为每个凭据获取 `email` 和 `project_id`（优先从配置映射，其次通过 API 发现）。
-- **自动刷新**: 后台线程定期检查凭据，如果凭据即将过期（默认提前 60 秒），则使用 `refresh_token` 自动刷新。
+- **自动刷新**: 后台线程定期检查凭据，如果凭据即将过期（默认提前 600 秒），则使用 `refresh_token` 自动刷新。
 - **轮转与重试**: 当发送 API 请求时，会从凭据池中选择一个可用凭据。如果收到 429 错误，该凭据会被暂时标记为 `EXHAUSTED`，然后切换到下一个可用凭据进行重试。
 
 ### 2. 数据格式转换
