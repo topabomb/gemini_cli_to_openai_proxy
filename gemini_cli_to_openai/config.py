@@ -2,17 +2,26 @@
 配置模块：
 - 提供 `default_settings`（无入参时使用的默认配置）。
 - 提供 `load_settings(config_path)`：从指定 JSON 文件加载并与默认值合并，路径归一化。
-- 提供硬编码的 OAuth 客户端常量与模型常量（从原 src/config.py 迁移）。
+- 提供硬编码的 OAuth 客户端常量与模型常量。
 - 仅使用配置/参数驱动，不读取环境变量。
 """
+
+import base64
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict, Union, cast
 
 
 # ===== 硬编码 OAuth 配置 =====
-CLIENT_ID = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"# Google OAuth 2.0 客户端 ID (Client ID)
-CLIENT_SECRET = "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" # Google OAuth 2.0 客户端密钥 (Client Secret)
+_ENCODED_CLIENT_ID = "NjgxMjU1ODA5Mzk1LW9vOGZ0Mm9wcmRybnA5ZTNhcWY2YXYzaG1kaWIxMzVqLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t"
+_ENCODED_CLIENT_SECRET = "R09DU1BYLTR1SGdNUG0tMW83U2stZ2VWNkN1NWNsWEZzeGw="
+
+CLIENT_ID = base64.b64decode(_ENCODED_CLIENT_ID).decode(
+    "utf-8"
+)  # Google OAuth 2.0 客户端 ID (Client ID)
+CLIENT_SECRET = base64.b64decode(_ENCODED_CLIENT_SECRET).decode(
+    "utf-8"
+)  # Google OAuth 2.0 客户端密钥 (Client Secret)
 SCOPES: List[str] = [
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -36,7 +45,7 @@ DEFAULT_SAFETY_SETTINGS = [
 ]
 
 
-# ===== 模型常量与帮助函数（从 src/config.py 迁移） =====
+# ===== 模型常量与帮助函数 =====
 BASE_MODELS = [
     {
         "name": "models/gemini-2.5-pro-preview-05-06",
@@ -127,7 +136,9 @@ def _generate_search_variants():
             search_variant = model.copy()
             search_variant["name"] = model["name"] + "-search"
             search_variant["displayName"] = model["displayName"] + " with Google Search"
-            search_variant["description"] = model["description"] + " (includes Google Search grounding)"
+            search_variant["description"] = (
+                model["description"] + " (includes Google Search grounding)"
+            )
             search_models.append(search_variant)
     return search_models
 
@@ -136,8 +147,9 @@ def _generate_thinking_variants():
     """根据基础模型生成 -nothinking 与 -maxthinking 变体。"""
     thinking_models = []
     for model in BASE_MODELS:
-        if ("generateContent" in model["supportedGenerationMethods"] and
-            ("gemini-2.5-flash" in model["name"] or "gemini-2.5-pro" in model["name"])):
+        if "generateContent" in model["supportedGenerationMethods"] and (
+            "gemini-2.5-flash" in model["name"] or "gemini-2.5-pro" in model["name"]
+        ):
             nt = model.copy()
             nt["name"] = model["name"] + "-nothinking"
             nt["displayName"] = model["displayName"] + " (No Thinking)"
@@ -209,58 +221,119 @@ def _abspath(path: Optional[str]) -> Optional[str]:
     return path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
 
 
-def _make_default_settings() -> Dict[str, Any]:
+# ===== 类型定义 =====
+class ServerSettings(TypedDict):
+    host: str
+    port: int
+
+
+class TimeoutsSettings(TypedDict):
+    connect: int
+    read: int
+
+
+class UsageLoggingSettings(TypedDict):
+    enabled: bool
+    interval_sec: int
+
+
+class SettingsDict(TypedDict):
+    server: ServerSettings
+    auth_keys: Union[str, List[str]]
+    credentials_file: str
+    external_credentials_file: Optional[str]
+    project_id_map: Dict[str, str]
+    min_credentials: int
+    log_level: str
+    request_timeouts: TimeoutsSettings
+    usage_logging: UsageLoggingSettings
+
+
+# ===== 默认配置 =====
+def _make_default_settings() -> SettingsDict:
     """生成默认配置（含路径归一化）。"""
-    data: Dict[str, Any] = {
+    # Define as a literal with the correct types
+    data: SettingsDict = {
         "server": {"host": "0.0.0.0", "port": 8888},
-        "auth_password": "123456",
+        "auth_keys": ["123456"],
         "credentials_file": "credentials.json",
         "external_credentials_file": None,
         "project_id_map": {},
         "min_credentials": 1,
         "log_level": "INFO",
+        "request_timeouts": {"connect": 60, "read": 90},
+        "usage_logging": {"enabled": True, "interval_sec": 30},
     }
-    # 归一化路径
-    data["credentials_file"] = _abspath(data["credentials_file"])  # type: ignore
-    data["external_credentials_file"] = _abspath(data.get("external_credentials_file"))  # type: ignore
+    # Make paths absolute, ensuring no None is assigned to non-optional type
+    abs_cred_file = _abspath(data["credentials_file"])
+    if abs_cred_file is None:
+        raise ValueError("Default credentials_file path is invalid and resulted in None.")
+    data["credentials_file"] = abs_cred_file
+    
+    data["external_credentials_file"] = _abspath(data.get("external_credentials_file"))
     return data
 
 
-default_settings: Dict[str, Any] = _make_default_settings()
+default_settings: SettingsDict = _make_default_settings()
 
 
-def _normalize_settings(data: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_settings(data: Dict[str, Any]) -> SettingsDict:
     """与默认配置合并并做路径归一化与基本校验。"""
-    result = dict(default_settings)
-    result.update(data or {})
+    settings = default_settings.copy()
+    user_data = data or {}
 
-    # server 合并与校正类型
-    server_default = default_settings.get("server", {})
-    server_in = result.get("server", {}) or {}
-    host = server_in.get("host", server_default.get("host", "0.0.0.0"))
-    port = int(server_in.get("port", server_default.get("port", 8888)))
-    result["server"] = {"host": host, "port": port}
+    # Server settings
+    server_in = user_data.get("server", {})
+    if server_in:
+        settings["server"]["host"] = server_in.get("host", default_settings["server"]["host"])
+        settings["server"]["port"] = int(server_in.get("port", default_settings["server"]["port"]))
 
-    # 路径归一化
-    result["credentials_file"] = _abspath(result.get("credentials_file"))
-    if result.get("external_credentials_file"):
-        result["external_credentials_file"] = _abspath(result.get("external_credentials_file"))
-    else:
-        result["external_credentials_file"] = None
+    # Auth keys
+    auth_keys = user_data.get("auth_keys")
+    if auth_keys:
+        if isinstance(auth_keys, str):
+            settings["auth_keys"] = [auth_keys]
+        else:
+            settings["auth_keys"] = auth_keys
+    
+    # File paths
+    cred_file = user_data.get("credentials_file")
+    if cred_file:
+        abs_path = _abspath(cred_file)
+        if abs_path:
+            settings["credentials_file"] = abs_path
 
-    # 其他默认
-    result["auth_password"] = result.get("auth_password", default_settings["auth_password"])  # type: ignore
-    result["project_id_map"] = result.get("project_id_map", {}) or {}
-    result["min_credentials"] = int(result.get("min_credentials", default_settings["min_credentials"]))  # type: ignore
-    result["log_level"] = result.get("log_level", default_settings["log_level"])  # type: ignore
-
-    return result
+    ext_cred_file = user_data.get("external_credentials_file")
+    if ext_cred_file:
+        settings["external_credentials_file"] = _abspath(ext_cred_file)
+    elif "external_credentials_file" in user_data: # handle explicit null
+        settings["external_credentials_file"] = None
 
 
-def load_settings(config_path: str) -> Dict[str, Any]:
+    # Other settings
+    if "project_id_map" in user_data:
+        settings["project_id_map"] = user_data["project_id_map"] or {}
+    if "min_credentials" in user_data:
+        settings["min_credentials"] = int(user_data["min_credentials"])
+    if "log_level" in user_data:
+        settings["log_level"] = user_data["log_level"]
+
+    # Nested dictionaries
+    timeouts_in = user_data.get("request_timeouts", {})
+    if timeouts_in:
+        settings["request_timeouts"]["connect"] = timeouts_in.get("connect", default_settings["request_timeouts"]["connect"])
+        settings["request_timeouts"]["read"] = timeouts_in.get("read", default_settings["request_timeouts"]["read"])
+
+    usage_in = user_data.get("usage_logging", {})
+    if usage_in:
+        settings["usage_logging"]["enabled"] = usage_in.get("enabled", default_settings["usage_logging"]["enabled"])
+        settings["usage_logging"]["interval_sec"] = usage_in.get("interval_sec", default_settings["usage_logging"]["interval_sec"])
+
+    return settings
+
+
+def load_settings(config_path: str) -> SettingsDict:
     """从指定路径读取配置文件，与默认值合并并归一化路径。"""
     with open(config_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return _normalize_settings(data)
-
-

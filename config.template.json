@@ -1,13 +1,19 @@
 {
   "server": { "host": "0.0.0.0", "port": 8888 },
-  "auth_password": "your-secret-password",
+  "auth_keys": ["your-secret-password"],
   "credentials_file": "credentials.json",
   "external_credentials_file": null,
   "project_id_map": {
     "user.email@example.com": "your-gcp-project-id"
   },
   "min_credentials": 1,
-  "log_level": "INFO"
+  "log_level": "INFO",
+  "request_timeouts": {
+    "connect": 60,
+    "read": 90
+  },
+  "usage_logging": {
+    "enabled": true,
+    "interval_sec": 30
+  }
 }
-
-

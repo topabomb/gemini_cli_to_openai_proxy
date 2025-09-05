@@ -1,24 +1,26 @@
 """
-凭据管理：
+凭据管理模块：
 - 仅持久化四字段：access_token、refresh_token、token_type、expiry_date(ms)。
 - 支持单对象或数组格式；导入外部文件时按 refresh_token 去重合并。
 - email 获取：优先使用 id_token 解码；否则调用 userinfo 接口；失败则视为失效。
 - project_id 解析顺序：config.project_id_map[email] -> API 发现 -> 失效。
 - 轮转与刷新：到期前刷新；429 标记 exhausted；状态仅在内存维护。
 """
+
 import json
 import logging
+import random
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import requests
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
-from .config import CLIENT_ID, CLIENT_SECRET, SCOPES, CODE_ASSIST_ENDPOINT
+from .config import CLIENT_ID, CLIENT_SECRET, SCOPES, CODE_ASSIST_ENDPOINT, SettingsDict
 from .utils import get_user_agent, get_client_metadata
 
 
@@ -87,7 +89,11 @@ def _get_email_from_credentials(creds: Credentials) -> Optional[str]:
         if getattr(creds, "id_token", None):
             # 尝试使用 OIDC userinfo 端点验证并取 email（即便本地解析失败）
             headers = {"Authorization": f"Bearer {creds.id_token}"}
-            resp = requests.get("https://openidconnect.googleapis.com/v1/userinfo", headers=headers, timeout=10)
+            resp = requests.get(
+                "https://openidconnect.googleapis.com/v1/userinfo",
+                headers=headers,
+                timeout=10,
+            )
             if resp.ok:
                 data = resp.json()
                 if data.get("email"):
@@ -98,7 +104,11 @@ def _get_email_from_credentials(creds: Credentials) -> Optional[str]:
     # 2) access_token
     try:
         headers = {"Authorization": f"Bearer {creds.token}"}
-        resp = requests.get("https://openidconnect.googleapis.com/v1/userinfo", headers=headers, timeout=10)
+        resp = requests.get(
+            "https://openidconnect.googleapis.com/v1/userinfo",
+            headers=headers,
+            timeout=10,
+        )
         if resp.ok:
             data = resp.json()
             if data.get("email"):
@@ -119,7 +129,12 @@ def _discover_project_id(creds: Credentials) -> Optional[str]:
             "User-Agent": get_user_agent(),
         }
         payload = {"metadata": get_client_metadata()}
-        resp = requests.post(f"{CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist", data=json.dumps(payload), headers=headers, timeout=20)
+        resp = requests.post(
+            f"{CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist",
+            data=json.dumps(payload),
+            headers=headers,
+            timeout=20,
+        )
         resp.raise_for_status()
         data = resp.json()
         pid = data.get("cloudaicompanionProject")
@@ -138,20 +153,27 @@ class CredentialStatus:
 
 @dataclass
 class ManagedCredential:
-    id: str
-    credentials: Credentials
-    project_id: Optional[str]
-    email: Optional[str]
-    status: str = CredentialStatus.ACTIVE
-    last_used: datetime = datetime.now()
-    usage_count: int = 0
-    exhausted_until: Optional[datetime] = None
+    """
+    封装一个 Google OAuth2 凭据及其相关的元数据和状态，用于凭据池管理。
+    """
+    id: str  # 凭据在池中的唯一标识符，例如 "cred-0"
+    credentials: Credentials  # Google 官方的凭据对象
+    project_id: Optional[str]  # 关联的 Google Cloud 项目 ID
+    email: Optional[str]  # 凭据所属的用户邮箱
+    status: str = CredentialStatus.ACTIVE  # 当前状态 (active, expired, exhausted, error)
+    last_used: datetime = datetime.now()  # 最后一次使用的时间戳
+    usage_count: int = 0  # 总使用次数
+    exhausted_until: Optional[datetime] = None  # 如果因速率限制而耗尽，则记录解禁时间
 
     def is_available(self) -> bool:
         now = datetime.now()
         if self.status in [CredentialStatus.EXPIRED, CredentialStatus.ERROR]:
             return False
-        if self.status == CredentialStatus.EXHAUSTED and self.exhausted_until and now < self.exhausted_until:
+        if (
+            self.status == CredentialStatus.EXHAUSTED
+            and self.exhausted_until
+            and now < self.exhausted_until
+        ):
             return False
         if self.credentials.expired:
             self.status = CredentialStatus.EXPIRED
@@ -170,7 +192,7 @@ class ManagedCredential:
 class CredentialManager:
     """统一的凭据池管理。"""
 
-    def __init__(self, settings: Dict[str, Any]):
+    def __init__(self, settings: SettingsDict):
         self.settings = settings
         self.credentials: List[ManagedCredential] = []
         self.current_index = 0
@@ -196,7 +218,9 @@ class CredentialManager:
         elif isinstance(data, list):
             return data
         else:
-            logging.warning("Invalid credentials file format; expecting object or array")
+            logging.warning(
+                "Invalid credentials file format; expecting object or array"
+            )
             return []
 
     def _write_file(self, path: str, items: List[Dict[str, Any]]):
@@ -206,7 +230,7 @@ class CredentialManager:
 
     # ===== 导入与加载 =====
     def import_external(self):
-        ext = self.settings.get("external_credentials_file")
+        ext = self.settings["external_credentials_file"]
         if not ext:
             return
         existing = self._read_file(self.settings["credentials_file"])
@@ -215,7 +239,9 @@ class CredentialManager:
         self._write_file(self.settings["credentials_file"], merged)
 
     @staticmethod
-    def _merge_by_refresh_token(a: List[Dict[str, Any]], b: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _merge_by_refresh_token(
+        a: List[Dict[str, Any]], b: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         seen = {}
         for item in a + b:
             rt = item.get("refresh_token")
@@ -235,21 +261,34 @@ class CredentialManager:
                 creds = _build_credentials_from_simple(item)
                 email = _get_email_from_credentials(creds)
                 if not email:
-                    logging.warning("Credential missing email; mark as invalid and skip")
+                    logging.warning(
+                        "Credential missing email; mark as invalid and skip"
+                    )
                     continue
                 # project_id 映射优先
-                pid = self.settings.get("project_id_map", {}).get(email)
+                pid = self.settings["project_id_map"].get(email)
                 if not pid:
-                    logging.info(f"project_id not found in map for {email}, discovering via API...")
+                    logging.debug(
+                        f"project_id not found in map for {email}, discovering via API..."
+                    )
                     pid = _discover_project_id(creds)
                 if not pid:
-                    logging.warning(f"Credential for {email} has no project_id; mark as invalid and skip")
+                    logging.warning(
+                        f"Credential for {email} has no project_id; mark as invalid and skip"
+                    )
                     continue
-                mc = ManagedCredential(id=f"cred-{idx}", credentials=creds, project_id=pid, email=email)
+                mc = ManagedCredential(
+                    id=f"cred-{idx}", credentials=creds, project_id=pid, email=email
+                )
                 self.credentials.append(mc)
-                logging.info(f"Loaded credential: id={mc.id}, email={email}, project={pid}")
+                logging.debug(
+                    f"Loaded credential: id={mc.id}, email={email}, project={pid}"
+                )
             except Exception as e:
                 logging.warning(f"Skipping invalid credential: {e}")
+        logging.info(
+            f"Loaded {self.get_credential_count()} credentials, {self.get_active_credential_count()} active."
+        )
 
     # ===== 选择与轮转 =====
     def get_available(self) -> Optional[ManagedCredential]:
@@ -278,17 +317,33 @@ class CredentialManager:
             for c in self.credentials:
                 if c.id == cred_id:
                     c.mark_exhausted(minutes)
-                    logging.warning(f"Marked exhausted: id={cred_id} for {minutes} minutes")
+                    logging.warning(
+                        f"Marked exhausted: id={cred_id} for {minutes} minutes"
+                    )
+                    break
+
+    def mark_as_invalid(self, cred_id: str):
+        with self.lock:
+            for c in self.credentials:
+                if c.id == cred_id:
+                    c.status = CredentialStatus.ERROR
+                    logging.error(
+                        f"Marked as invalid (permanently): id={cred_id}, "
+                        f"email={c.email}, project_id={c.project_id}. "
+                        "This credential will not be used again."
+                    )
                     break
 
     # ===== 刷新与后台任务 =====
     def _refresh_credential(self, c: ManagedCredential) -> bool:
         try:
+            logging.debug(f"Attempting to refresh credential for {c.email}...")
             c.credentials.refresh(GoogleAuthRequest())
             _normalize_expiry_to_naive_utc(c.credentials)
             # 刷新成功后立即落盘
             self._persist_current()
             c.status = CredentialStatus.ACTIVE
+            logging.info(f"Refreshed credential for {c.email} successfully.")
             return True
         except Exception as e:
             logging.error(f"Refresh failed for {c.email}: {e}")
@@ -317,7 +372,9 @@ class CredentialManager:
                         except Exception:
                             exp = c.credentials.expiry
                         now_naive = datetime.utcnow()
-                        if (exp - now_naive) < timedelta(seconds=600):
+                        # 随机化刷新阈值，分散刷新请求
+                        jitter_seconds = random.randint(300, 600)
+                        if (exp - now_naive) < timedelta(seconds=jitter_seconds):
                             if c.credentials.refresh_token:
                                 self._refresh_credential(c)
                 self.stop_event.wait(self.refresh_interval_sec)
@@ -344,6 +401,35 @@ class CredentialManager:
     def get_active_credential_count(self) -> int:
         return sum(1 for c in self.credentials if c.is_available())
 
+    def get_credential_details(self, cred_id: str) -> Dict[str, Any]:
+        """根据 ID 获取凭据的非敏感信息。"""
+        with self.lock:
+            for c in self.credentials:
+                if c.id == cred_id:
+                    # 转换为本地时间
+                    local_expiry_str = "N/A"
+                    if c.credentials.expiry:
+                        try:
+                            # 假设 c.credentials.expiry 是 naive UTC
+                            utc_expiry = c.credentials.expiry.replace(
+                                tzinfo=timezone.utc
+                            )
+                            local_expiry = utc_expiry.astimezone()
+                            local_expiry_str = local_expiry.strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            )
+                        except Exception:
+                            # 如果转换失败，则保留原始格式
+                            local_expiry_str = str(c.credentials.expiry)
+
+                    return {
+                        "email": c.email,
+                        "project_id": c.project_id,
+                        "status": c.status,
+                        "expiry": local_expiry_str,
+                    }
+        return {}
+
     # ===== 新增：添加凭据（用于 OAuth 流程） =====
     def add_credentials(self, creds: Credentials) -> Tuple[bool, Optional[str]]:
         """
@@ -360,26 +446,37 @@ class CredentialManager:
             with self.lock:
                 for c in self.credentials:
                     if c.credentials.refresh_token == rt:
-                        logging.warning("Duplicate credential by refresh_token; skip add")
+                        logging.warning(
+                            "Duplicate credential by refresh_token; skip add"
+                        )
                         return False, "duplicate_refresh_token"
 
             email = _get_email_from_credentials(creds)
             if not email:
                 return False, "missing_email"
-            pid = self.settings.get("project_id_map", {}).get(email)
+            pid = self.settings["project_id_map"].get(email)
             if not pid:
-                logging.info(f"project_id not found in map for {email}, discovering via API...")
+                logging.info(
+                    f"project_id not found in map for {email}, discovering via API..."
+                )
                 pid = _discover_project_id(creds)
             if not pid:
                 return False, "missing_project_id"
-            
-            with self.lock: 
+
+            with self.lock:
                 for existing_cred in self.credentials:
                     if existing_cred.email == email:
-                        logging.warning(f"Adding credential for email '{email}' which already exists in the pool (ID: {existing_cred.id}). This credential will be added as a separate entry.")
-                        break # 找到一个就够了，跳出循环
+                        logging.warning(
+                            f"Adding credential for email '{email}' which already exists in the pool (ID: {existing_cred.id}). This credential will be added as a separate entry."
+                        )
+                        break  # 找到一个就够了，跳出循环
 
-            mc = ManagedCredential(id=f"cred-{len(self.credentials)}", credentials=creds, project_id=pid, email=email)
+            mc = ManagedCredential(
+                id=f"cred-{len(self.credentials)}",
+                credentials=creds,
+                project_id=pid,
+                email=email,
+            )
             with self.lock:
                 self.credentials.append(mc)
                 self._persist_current()
@@ -388,5 +485,3 @@ class CredentialManager:
         except Exception as e:
             logging.error(f"Failed to add credential: {e}")
             return False, "exception"
-
-

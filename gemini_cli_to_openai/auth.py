@@ -4,12 +4,13 @@
 - OAuth 浏览器流程：获取 Credentials 后仅持久化四字段。
 - onboard 与 project_id 发现逻辑复用，移除环境变量依赖。
 """
+
 import base64
 import json
 import logging
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, cast
 
 import requests
 from fastapi import HTTPException, Request
@@ -22,33 +23,36 @@ from .utils import get_user_agent, get_client_metadata
 from .credentials import _credentials_to_simple
 
 
-def authenticate_request(request: Request, password: str) -> str:
-    """统一鉴权：返回用户名或声明字符串。"""
-    # query 参数 key
+def authenticate_request(request: Request, auth_keys: List[str]) -> str:
+    """
+    统一鉴权逻辑。
+    验证成功后返回匹配的 auth_key，用于后续的用量统计和策略执行。
+    """
+    # 1. 从 Query 参数 ?key=... 获取
     api_key = request.query_params.get("key")
-    if api_key and api_key == password:
-        return "api_key_user"
+    if api_key and api_key in auth_keys:
+        return api_key
 
-    # x-goog-api-key 头
+    # 2. 从 x-goog-api-key 头获取
     gk = request.headers.get("x-goog-api-key", "")
-    if gk and gk == password:
-        return "goog_api_key_user"
+    if gk and gk in auth_keys:
+        return gk
 
-    # Authorization Bearer
+    # 3. 从 Authorization: Bearer ... 获取
     auth_header = request.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
-        if token == password:
-            return "bearer_user"
+        if token in auth_keys:
+            return token
 
-    # HTTP Basic
+    # 4. 从 HTTP Basic Auth 获取
     if auth_header.startswith("Basic "):
         try:
             encoded = auth_header[6:]
             decoded = base64.b64decode(encoded).decode("utf-8", "ignore")
-            username, pwd = decoded.split(":", 1)
-            if pwd == password:
-                return username
+            _, pwd = decoded.split(":", 1)
+            if pwd in auth_keys:
+                return pwd
         except Exception:
             pass
 
@@ -61,15 +65,19 @@ def authenticate_request(request: Request, password: str) -> str:
 
 class _OAuthCallbackHandler(BaseHTTPRequestHandler):
     auth_code: Optional[str] = None
+
     def do_GET(self):
         from urllib.parse import urlparse, parse_qs
+
         code = parse_qs(urlparse(self.path).query).get("code", [None])[0]
         if code:
             _OAuthCallbackHandler.auth_code = code
             self.send_response(200)
             self.send_header("Content-type", "text/html")
             self.end_headers()
-            self.wfile.write(b"<h1>OAuth authentication successful!</h1><p>You can close this window.</p>")
+            self.wfile.write(
+                b"<h1>OAuth authentication successful!</h1><p>You can close this window.</p>"
+            )
         else:
             self.send_response(400)
             self.send_header("Content-type", "text/html")
@@ -98,24 +106,32 @@ def run_oauth_flow() -> Optional[Credentials]:
         }
     }
     redirect_uri = f"http://127.0.0.1:{port}"
-    flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
+    flow = Flow.from_client_config(
+        client_config, scopes=SCOPES, redirect_uri=redirect_uri
+    )
     flow.oauth2session.scope = SCOPES
-    auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent", include_granted_scopes="true")
+    auth_url, _ = flow.authorization_url(
+        access_type="offline", prompt="consent", include_granted_scopes="true"
+    )
 
     # 提示用户登录
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("AUTHENTICATION REQUIRED")
-    print("="*80)
+    print("=" * 80)
     print("Please open this URL in your browser to log in:")
     print(auth_url)
-    print("="*80 + "\n")
+    print("=" * 80 + "\n")
 
     # 等待回调（轮询 handle_request，带超时与日志）
     import time as _time
+
     start_ts = _time.time()
     max_wait = 300  # 5 分钟超时
     try:
-        while _OAuthCallbackHandler.auth_code is None and (_time.time() - start_ts) < max_wait:
+        while (
+            _OAuthCallbackHandler.auth_code is None
+            and (_time.time() - start_ts) < max_wait
+        ):
             server.handle_request()
         code = _OAuthCallbackHandler.auth_code
     finally:
@@ -130,12 +146,15 @@ def run_oauth_flow() -> Optional[Credentials]:
 
     # 容忍参数校验告警
     import oauthlib.oauth2.rfc6749.parameters
+
     original_validate = oauthlib.oauth2.rfc6749.parameters.validate_token_parameters
+
     def patched_validate(params):
         try:
             return original_validate(params)
         except Warning:
             pass
+
     oauthlib.oauth2.rfc6749.parameters.validate_token_parameters = patched_validate
 
     # 交换 token
@@ -143,8 +162,10 @@ def run_oauth_flow() -> Optional[Credentials]:
     logging.info("Exchanging authorization code for tokens...")
     try:
         flow.fetch_token(code=code)
-        logging.info(f"Token exchange finished in {int((_time.time()-fetch_start)*1000)} ms")
-        return flow.credentials
+        logging.info(
+            f"Token exchange finished in {int((_time.time()-fetch_start)*1000)} ms"
+        )
+        return flow.credentials # type: ignore
     finally:
         oauthlib.oauth2.rfc6749.parameters.validate_token_parameters = original_validate
 
@@ -158,9 +179,17 @@ def onboard_user(creds: Credentials, project_id: str):
         "Content-Type": "application/json",
         "User-Agent": get_user_agent(),
     }
-    load_payload = {"cloudaicompanionProject": project_id, "metadata": get_client_metadata(project_id)}
+    load_payload = {
+        "cloudaicompanionProject": project_id,
+        "metadata": get_client_metadata(project_id),
+    }
     try:
-        resp = requests.post(f"{CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist", data=json.dumps(load_payload), headers=headers, timeout=20)
+        resp = requests.post(
+            f"{CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist",
+            data=json.dumps(load_payload),
+            headers=headers,
+            timeout=20,
+        )
         resp.raise_for_status()
         data = resp.json()
         tier = data.get("currentTier")
@@ -172,27 +201,31 @@ def onboard_user(creds: Credentials, project_id: str):
             if not tier:
                 tier = {"id": "legacy-tier", "userDefinedCloudaicompanionProject": True}
         if tier.get("userDefinedCloudaicompanionProject") and not project_id:
-            raise ValueError("This account requires setting project_id in config project_id_map.")
+            raise ValueError(
+                "This account requires setting project_id in config project_id_map."
+            )
 
         if data.get("currentTier"):
             return
 
-        onboard_payload = {"tierId": tier.get("id"), "cloudaicompanionProject": project_id, "metadata": get_client_metadata(project_id)}
+        onboard_payload = {
+            "tierId": tier.get("id"),
+            "cloudaicompanionProject": project_id,
+            "metadata": get_client_metadata(project_id),
+        }
         while True:
-            r = requests.post(f"{CODE_ASSIST_ENDPOINT}/v1internal:onboardUser", data=json.dumps(onboard_payload), headers=headers, timeout=20)
+            r = requests.post(
+                f"{CODE_ASSIST_ENDPOINT}/v1internal:onboardUser",
+                data=json.dumps(onboard_payload),
+                headers=headers,
+                timeout=20,
+            )
             r.raise_for_status()
             lro = r.json()
             if lro.get("done"):
                 break
             time.sleep(5)
     except requests.exceptions.HTTPError as e:
-        raise Exception(f"User onboarding failed: {e.response.text if hasattr(e, 'response') else str(e)}")
-
-
-def save_credentials_simple(path: str, creds_list: list):
-    """以四字段格式保存多个凭据。"""
-    out = creds_list if len(creds_list) > 1 else (creds_list[0] if creds_list else [])
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2)
-
-
+        raise Exception(
+            f"User onboarding failed: {e.response.text if hasattr(e, 'response') else str(e)}"
+        )

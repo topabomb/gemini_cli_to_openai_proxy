@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import uvicorn
+from typing import cast
 import argparse # 引入 argparse 模块
 
 

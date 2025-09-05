@@ -1,5 +1,5 @@
 """
-通用工具函数迁移自 src/utils.py。
+通用工具函数
 """
 import platform
 
