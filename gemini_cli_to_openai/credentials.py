@@ -318,7 +318,7 @@ class CredentialManager:
                 if c.id == cred_id:
                     c.mark_exhausted(minutes)
                     logging.warning(
-                        f"Marked exhausted: id={cred_id} for {minutes} minutes"
+                        f"Marked exhausted: id={c.id}, email={c.email} for {minutes} minutes"
                     )
                     break
 

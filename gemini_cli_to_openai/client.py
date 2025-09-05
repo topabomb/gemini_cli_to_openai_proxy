@@ -219,7 +219,7 @@ class ApiClient:
 
         post_data = json.dumps(final_payload)
         logging.info(
-            f"Dispatching request for model={model} (streaming={is_streaming}) to project={proj_id} with cred={cred_id}"
+            f"Dispatching request for model={model} (streaming={is_streaming}) to project={proj_id} with cred={cred_id}, email={getattr(managed, 'email', 'N/A')}"
         )
 
         timeouts = self.settings["request_timeouts"]
@@ -397,6 +397,8 @@ class ApiClient:
                 f"Begin SSE relay from upstream for cred={cred_id}, model={model_name}"
             )
             usage_metadata = None
+            response_model_version = None
+            final_model_name = model_name  # 初始化 final_model_name
             start_time = time.time()
             try:
                 with resp:
@@ -419,6 +421,9 @@ class ApiClient:
                                         in response_obj["usageMetadata"]
                                     ):
                                         usage_metadata = response_obj["usageMetadata"]
+                                
+                                if "modelVersion" in obj:
+                                    response_model_version = obj["modelVersion"]
 
                                 if "response" in obj:
                                     response_chunk = obj["response"]
@@ -464,13 +469,17 @@ class ApiClient:
                     f"Stream finished. Usage metadata found: {usage_metadata is not None}"
                 )
                 if usage_tracker and usage_metadata:
-                    logging.debug(f"Recording usage metadata: {usage_metadata}")
+                    from .config import get_base_model_name
+                    final_model_name = response_model_version or get_base_model_name(model_name)
+                    logging.debug(f"Recording usage metadata for model {final_model_name}: {usage_metadata}")
                     usage_tracker.record_successful_request(
-                        auth_key, cred_id, model_name, usage_metadata
+                        auth_key, cred_id, final_model_name, usage_metadata
                     )
                 duration = time.time() - start_time
+                cred_details = self.credential_manager.get_credential_details(cred_id)
+                email_for_log = cred_details.get("email", "N/A")
                 logging.info(
-                    f"Finished request for cred={cred_id}, model={model_name} in {duration:.2f} seconds."
+                    f"Finished request for cred={cred_id}, email={email_for_log}, model={final_model_name} in {duration:.2f} seconds."
                 )
 
         return StreamingResponse(stream_gen(), media_type="text/event-stream")
@@ -514,12 +523,14 @@ class ApiClient:
                         )
                     else:
                         usage_metadata = obj.get("usageMetadata")
+                        from .config import get_base_model_name
+                        final_model_name = obj.get("modelVersion") or get_base_model_name(model_name)
                         usage_tracker.record_successful_request(
-                            auth_key, cred_id, model_name, usage_metadata or {}
+                            auth_key, cred_id, final_model_name, usage_metadata or {}
                         )
                         if usage_metadata:
                             logging.info(
-                                f"Usage recorded for non-stream request {auth_key}/{cred_id}/{model_name}"
+                                f"Usage recorded for non-stream request {auth_key}/{cred_id}/{final_model_name}"
                             )
 
                 standard = obj.get("response", obj)
