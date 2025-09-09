@@ -121,8 +121,6 @@ def _get_email_from_credentials(creds: Credentials) -> Optional[str]:
 def _discover_project_id(creds: Credentials) -> Optional[str]:
     """通过 API 发现 project_id。"""
     try:
-        if creds.expired and creds.refresh_token:
-            creds.refresh(GoogleAuthRequest())
         headers = {
             "Authorization": f"Bearer {creds.token}",
             "Content-Type": "application/json",
@@ -256,13 +254,33 @@ class CredentialManager:
         simple_items = self._read_file(self.settings["credentials_file"])
         logging.info(f"Loading credentials from file, count={len(simple_items)}")
         self.credentials = []
+        refreshed_any = False
         for idx, item in enumerate(simple_items):
             try:
                 creds = _build_credentials_from_simple(item)
+
+                # 如果凭据已过期，立即尝试刷新
+                if creds.expired and creds.refresh_token:
+                    try:
+                        logging.debug(
+                            f"Credential for item {idx} expired, attempting to refresh upon load..."
+                        )
+                        creds.refresh(GoogleAuthRequest())
+                        _normalize_expiry_to_naive_utc(creds)
+                        refreshed_any = True
+                        logging.info(
+                            f"Credential for item {idx} refreshed successfully upon load."
+                        )
+                    except Exception as e:
+                        logging.warning(
+                            f"Failed to refresh credential for item {idx} on load, skipping: {e}"
+                        )
+                        continue
+
                 email = _get_email_from_credentials(creds)
                 if not email:
                     logging.warning(
-                        "Credential missing email; mark as invalid and skip"
+                        f"Credential for item {idx} missing email; mark as invalid and skip"
                     )
                     continue
                 # project_id 映射优先
@@ -289,6 +307,8 @@ class CredentialManager:
         logging.info(
             f"Loaded {self.get_credential_count()} credentials, {self.get_active_credential_count()} active."
         )
+        if refreshed_any:
+            self._persist_current()
 
     # ===== 选择与轮转 =====
     def get_available(self) -> Optional[ManagedCredential]:
