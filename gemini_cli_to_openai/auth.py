@@ -118,7 +118,9 @@ def run_oauth_flow() -> Optional[Credentials]:
     print("\n" + "=" * 80)
     print("AUTHENTICATION REQUIRED")
     print("=" * 80)
-    print("Please open this URL in your browser to log in:")
+    print("Please open this URL in your browser to log in.")
+    print("The application will wait for you to complete the process.")
+    print()
     print(auth_url)
     print("=" * 80 + "\n")
 
@@ -170,8 +172,11 @@ def run_oauth_flow() -> Optional[Credentials]:
         oauthlib.oauth2.rfc6749.parameters.validate_token_parameters = original_validate
 
 
-def onboard_user(creds: Credentials, project_id: str):
+def onboard_user(creds: Credentials, project_id: str, email: str = "unknown"):
     """执行用户上船，与 src/auth.py 一致。"""
+    start_time = time.time()
+    logging.info(f"Performing one-time setup for {email}...")
+
     if creds.expired and creds.refresh_token:
         creds.refresh(GoogleAuthRequest())
     headers = {
@@ -225,6 +230,9 @@ def onboard_user(creds: Credentials, project_id: str):
             if lro.get("done"):
                 break
             time.sleep(5)
+        
+        duration = time.time() - start_time
+        logging.info(f"Setup for {email} completed in {duration:.2f}s.")
     except requests.exceptions.HTTPError as e:
         raise Exception(
             f"User onboarding failed: {e.response.text if hasattr(e, 'response') else str(e)}"

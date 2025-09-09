@@ -66,6 +66,7 @@ class UsageTracker:
         # 数据结构: {auth_key: {cred_id: {model_name: ModelStats}}}
         self.stats: StatsDict = defaultdict(_create_nested_defaultdict)
         self._last_logged_stats: Optional[Dict[str, Any]] = None
+        self._last_logged_cred_status: Optional[str] = None
         self.lock = threading.Lock()
         self.credential_manager = credential_manager
         self._log_thread: Optional[threading.Thread] = None
@@ -226,11 +227,35 @@ class UsageTracker:
 
             self._last_logged_stats = current_stats_dict
 
+    def _log_credential_status_summary(self):
+        """记录单行凭据状态摘要（仅当状态变化时）。"""
+        try:
+            with self.lock:
+                all_creds = self.credential_manager.credentials
+                if not all_creds:
+                    return
+
+                status_parts = []
+                for cred in sorted(all_creds, key=lambda c: c.email or ""):
+                    email = cred.email or "unknown"
+                    status = cred.status
+                    status_parts.append(f"{email}({status})")
+                
+                current_status_str = "; ".join(status_parts)
+                if current_status_str != self._last_logged_cred_status:
+                    logging.info(f"Credential Status: {current_status_str}")
+                    self._last_logged_cred_status = current_status_str
+        except Exception as e:
+            logging.debug(f"Could not log credential status summary: {e}")
+
     def _logging_loop(self, interval_sec: int):
         """后台日志循环。"""
         logging.debug(f"Usage logging loop started.")
         while not self._stop_event.wait(interval_sec):
             try:
+                # 1. 定期输出凭据状态摘要
+                self._log_credential_status_summary()
+                # 2. 按需输出详细用量报告
                 logging.debug("Executing periodic usage stats check.")
                 self._format_and_log_stats()
             except Exception as e:
@@ -246,7 +271,7 @@ class UsageTracker:
             target=self._logging_loop, args=(interval_sec,), daemon=True
         )
         self._log_thread.start()
-        logging.info(f"Usage stats logging task started with {interval_sec}s interval.")
+        logging.debug(f"Usage stats logging task started with {interval_sec}s interval.")
 
     def stop_logging_task(self):
         """停止后台日志线程。"""

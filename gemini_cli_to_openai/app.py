@@ -71,8 +71,17 @@ def create_app(settings: SettingsDict) -> FastAPI:
                 interval = settings["usage_logging"]["interval_sec"]
                 _state.usage_tracker.start_logging_task(interval)
 
+            # 记录加载结果
+            cred_count = _state.credential_manager.get_credential_count()
+            active_count = _state.credential_manager.get_active_credential_count()
+            active_emails = [
+                c.email
+                for c in _state.credential_manager.credentials
+                if c.is_available() and c.email
+            ]
             logging.info(
-                f"Loaded { _state.credential_manager.get_credential_count() } credentials, { _state.credential_manager.get_active_credential_count() } active"
+                f"Loaded {cred_count} credentials, {active_count} active. "
+                f"Active emails: {active_emails}"
             )
         except Exception as e:
             logging.error(f"Startup error: {e}")
@@ -131,8 +140,13 @@ def _interactive_oauth_acquire(settings: SettingsDict, _state):
         and attempts < max_attempts
     ):
         attempts += 1
+        active_count = _state.credential_manager.get_active_credential_count()
+        known_emails = [
+            c.email for c in _state.credential_manager.credentials if c.email
+        ]
         logging.info(
-            f"OAuth attempt {attempts}/{max_attempts} - active={_state.credential_manager.get_active_credential_count()} target={target}"
+            f"OAuth attempt {attempts}/{max_attempts}: active={active_count}/{target}. "
+            f"Known emails: {known_emails}. Starting new authentication..."
         )
         creds = run_oauth_flow()
         if not creds:
@@ -157,9 +171,8 @@ def _interactive_oauth_acquire(settings: SettingsDict, _state):
         try:
             # 找到刚刚添加的最后一条
             mc = _state.credential_manager.credentials[-1]
-            logging.info(f"Onboarding user: email={mc.email}, project={mc.project_id}")
-            onboard_user(mc.credentials, mc.project_id)
-            logging.info("Onboarding completed.")
+            if mc.email and mc.project_id:
+                onboard_user(mc.credentials, mc.project_id, mc.email)
         except Exception as e:
             logging.warning(f"Onboarding failed (non-blocking): {e}")
     if _state.credential_manager.get_active_credential_count() < target:

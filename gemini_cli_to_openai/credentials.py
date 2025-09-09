@@ -305,7 +305,7 @@ class CredentialManager:
             except Exception as e:
                 logging.warning(f"Skipping invalid credential: {e}")
         logging.info(
-            f"Loaded {self.get_credential_count()} credentials, {self.get_active_credential_count()} active."
+            f"Loaded {self.get_credential_count()} credentials from persistent storage({self.settings['credentials_file']}), {self.get_active_credential_count()} active."
         )
         if refreshed_any:
             self._persist_current()
@@ -361,7 +361,7 @@ class CredentialManager:
             c.credentials.refresh(GoogleAuthRequest())
             _normalize_expiry_to_naive_utc(c.credentials)
             # 刷新成功后立即落盘
-            self._persist_current()
+            self._persist_current(is_new=False)
             c.status = CredentialStatus.ACTIVE
             logging.info(f"Refreshed credential for {c.email} successfully.")
             return True
@@ -370,12 +370,13 @@ class CredentialManager:
             c.status = CredentialStatus.ERROR
             return False
 
-    def _persist_current(self):
+    def _persist_current(self, is_new: bool = False):
         items: List[Dict[str, Any]] = []
         for c in self.credentials:
             items.append(_credentials_to_simple(c.credentials))
         self._write_file(self.settings["credentials_file"], items)
-        logging.info("Persisted credentials to file (simple format)")
+        log_level = logging.INFO if is_new else logging.DEBUG
+        logging.log(log_level, "Persisted credentials to file (simple format)")
 
     def _refresh_loop(self):
         while not self.stop_event.is_set():
@@ -499,8 +500,8 @@ class CredentialManager:
             )
             with self.lock:
                 self.credentials.append(mc)
-                self._persist_current()
-            logging.info(f"Added credential: email={email}, project={pid}")
+                self._persist_current(is_new=True)
+            logging.info(f"Added new credential: id={mc.id}, email={email}, project={pid}")
             return True, None
         except Exception as e:
             logging.error(f"Failed to add credential: {e}")
