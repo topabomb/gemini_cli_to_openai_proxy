@@ -69,11 +69,13 @@ async def health_check():
 async def oauth2_login(request: Request):
     """重定向到 Google 授权页面。"""
     settings = request.app.state.settings
-    
-    # 动态确定回调 URI
-    redirect_uri = settings.get("oauth_redirect_uri")
-    if not redirect_uri:
-        # 从请求头推断
+    public_url = settings.get("public_url")
+
+    # 优先使用 public_url 构建回调 URI
+    if public_url:
+        redirect_uri = public_url.rstrip('/') + '/oauth2/callback'
+    else:
+        # 否则，回退到从请求头推断，方便本地使用
         host = request.headers.get("host", "localhost")
         scheme = request.url.scheme
         redirect_uri = f"{scheme}://{host}/oauth2/callback"

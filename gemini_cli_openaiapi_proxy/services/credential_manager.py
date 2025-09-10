@@ -319,7 +319,11 @@ class CredentialManager:
                             if expiry_utc < datetime.now(timezone.utc) + timedelta(minutes=10):
                                 if c.credentials.refresh_token and c.status == CredentialStatus.ACTIVE:
                                     await self._refresh_credential(c)
-                await asyncio.sleep(300)
+                
+                base_interval = 300
+                # 在基础间隔的 50% 到 100% 之间随机选择延迟时间
+                delay = base_interval * random.uniform(0.5, 1.0)
+                await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 logger.info("[CredManager] Refresh loop cancelled.")
                 break

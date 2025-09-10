@@ -53,7 +53,7 @@ pip install -r requirements.txt
 | `credentials_file` | `string` | 存储 OAuth 凭据的 JSON 文件路径。 | `"credentials1.json"` |
 | `project_id_map` | `dict` | 用户邮箱到 GCP 项目 ID 的映射。强烈建议配置此项以提高稳定性。 | `{}` |
 | `min_credentials` | `integer` | 启动时所需的最小有效凭据数。如果可用凭据少于此值，将打印警告。 | `1` |
-| `public_url` | `string` (可选) | 服务的公开访问 URL。用于生成 OAuth 回调和启动警告中的链接。 | `null` |
+| `public_url` | `string` (可选) | **（推荐用于生产环境）** 服务的公开访问 URL。如果设置此项，OAuth 认证将使用此 URL 构建回调地址。<br>**⚠️ 重要:** 您填写的此 URL 加上 `/oauth2/callback` 的路径（例如 `https://your-domain.com/oauth2/callback`）**必须**被添加到您 Google Cloud Console 项目的 OAuth 2.0 客户端 ID 的“已获授权的重定向 URI”列表中。如果留空，服务将尝试从请求头中自动推断（适用于本地 `localhost` 测试）。 | `null` |
 | `log_level` | `string` | 日志级别 (DEBUG, INFO, WARNING, ERROR)。 | `"debug"` |
 | `request_timeouts` | `dict` | 对上游 Google API 的请求超时（秒）。 | `{"connect": 60, "read": 90}` |
 | `usage_logging` | `dict` | 用量统计日志配置。 | `{"enabled": true, "interval_sec": 30}` |
