@@ -35,7 +35,7 @@ async def get_admin_ui(
     inactive_creds = total_creds - active_creds
     
     cred_stats_html = f"""
-        <h2>Credential Pool</h2>
+        <h4>Credential Pool</h4>
         <ul>
             <li>Total Credentials: <strong>{total_creds}</strong></li>
             <li>Available: <strong>{active_creds}</strong></li>
@@ -45,7 +45,7 @@ async def get_admin_ui(
     
     # 2. 获取并处理用量统计
     usage_summary = await usage_tracker.get_aggregated_usage_summary()
-    usage_html = "<h2>Usage by Model</h2>"
+    usage_html = "<h4>Usage by Model</h4>"
     if usage_summary:
         usage_html += """
             <table>
@@ -75,33 +75,28 @@ async def get_admin_ui(
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Gemini API Proxy Management</title>
+        <title>Model API Proxy Management</title>
     </head>
     <body>
+        <h2>Model API Proxy Management</h2>
+        <hr/>
         <div>
-            <h1>Gemini API Proxy Management</h1>
-            
-            <div>
-                <h2>Live Statistics</h2>
-                {cred_stats_html}
-                {usage_html}
-            </div>
-
-            <div>
-                <h2>Actions</h2>
-                <p>Click the link below to start the Google OAuth2 process and add a new credential to the pool.</p>
-                <a href="/oauth2/login" target="_blank"><strong>Start Authentication</strong></a>
-            </div>
-
-            <div>
-                <h2>Monitoring Endpoints</h2>
-                <p>Check the detailed status of credentials and API usage via JSON endpoints.</p>
-                <ul>
-                    <li><a href="/admin/credentials" >View Credentials Status</a></li>
-                    <li><a href="/admin/usage" >View Usage Stats</a></li>
-                    <li><a href="/health" >Health Check</a></li>
-                </ul>
-            </div>
+            <h3>Live Statistics</h3>
+            {cred_stats_html}
+            {usage_html}
+        </div>
+        <div>
+            <h3>Actions</h3>
+            <p>Click the link below to start the Google OAuth2 process and add a new credential to the pool.</p>
+            <a href="/oauth2/login" target="_blank"><strong>Start Authentication</strong></a>
+        </div>
+        <div>
+            <h3>Endpoints</h3>
+            <ul>
+                <li><a href="/admin/credentials" >View Credentials Status</a></li>
+                <li><a href="/admin/usage" >View Usage Stats</a></li>
+                <li><a href="/health" >Health Check</a></li>
+            </ul>
         </div>
     </body>
     </html>
