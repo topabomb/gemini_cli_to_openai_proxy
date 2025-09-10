@@ -92,7 +92,7 @@ class ManagedCredential:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_used_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_refreshed_at: Optional[datetime] = None
-    exhausted_until: Optional[datetime] = None
+    rate_limited_until: Optional[datetime] = None
     failed_at: Optional[datetime] = None
     
     # 统计与状态
@@ -101,7 +101,13 @@ class ManagedCredential:
 
     def is_available(self) -> bool:
         """检查凭据当前是否可用（仅用于轮询，不检查过期）。"""
-        if self.status != CredentialStatus.ACTIVE:
+        if self.status == CredentialStatus.RATE_LIMITED:
+            if self.rate_limited_until and datetime.now(timezone.utc) < self.rate_limited_until:
+                return False
+            # If cooldown is over, it's not "available" yet, but can be picked up by lazy refresh.
+            # For direct polling, only ACTIVE is truly available.
+            return False 
+        elif self.status != CredentialStatus.ACTIVE:
             return False
         
         is_expired = False
@@ -120,7 +126,7 @@ class ManagedCredential:
 
     def mark_rate_limited(self, minutes: int = 30):
         self.status = CredentialStatus.RATE_LIMITED
-        self.exhausted_until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        self.rate_limited_until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
         self.failure_reason = "429 Too Many Requests"
         self.failed_at = datetime.now(timezone.utc)
 
@@ -393,7 +399,7 @@ class CredentialManager:
                             continue # 处理完一个就进入下一个循环，避免重复操作
 
                         # 2. 处理已度过冷静期的速率限制状态
-                        if c.status == CredentialStatus.RATE_LIMITED and c.exhausted_until and datetime.now(timezone.utc) > c.exhausted_until:
+                        if c.status == CredentialStatus.RATE_LIMITED and c.rate_limited_until and datetime.now(timezone.utc) > c.rate_limited_until:
                             logger.info(f"[CredManager] Credential for {sanitize_email(c.email)} has recovered from rate limit, attempting refresh.")
                             await self._refresh_credential(c)
                             continue
@@ -452,7 +458,7 @@ class CredentialManager:
                 "created_at": format_datetime(c.created_at),
                 "last_used_at": format_datetime(c.last_used_at),
                 "last_refreshed_at": format_datetime(c.last_refreshed_at),
-                "exhausted_until": format_datetime(c.exhausted_until),
+                "rate_limited_until": format_datetime(c.rate_limited_until),
                 "failed_at": format_datetime(c.failed_at),
                 "failure_reason": c.failure_reason,
             })
