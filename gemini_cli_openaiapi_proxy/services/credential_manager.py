@@ -4,13 +4,17 @@
 - 所有 I/O 操作都将改造为异步。
 """
 
+import base64
+import hashlib
 import json
 import logging
 import random
+import sys
 
 logger = logging.getLogger(__name__)
 import asyncio
 import httpx
+from cryptography.fernet import Fernet, InvalidToken
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,6 +23,7 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
 from ..core.config import SettingsDict, CLIENT_ID, CLIENT_SECRET, SCOPES, CODE_ASSIST_ENDPOINT
+from ..utils.sanitizer import sanitize_email, sanitize_project_id
 
 # ===== 辅助函数 =====
 
@@ -56,6 +61,13 @@ def _credentials_to_simple(creds: Credentials) -> Dict[str, Any]:
         "token_type": "Bearer",
         "expiry_date": expiry_ms,
     }
+
+def _derive_key(user_key: str) -> bytes:
+    """从用户提供的字符串派生一个确定性的、URL安全的 Fernet 密钥。"""
+    # 使用 SHA-256 生成一个32字节的哈希值
+    digest = hashlib.sha256(user_key.encode('utf-8')).digest()
+    # 使用 URL-safe Base64 编码，使其符合 Fernet 密钥格式
+    return base64.urlsafe_b64encode(digest)
 
 # ===== 数据类定义 =====
 
@@ -132,25 +144,68 @@ class CredentialManager:
         self.current_index = 0
         self.lock = asyncio.Lock()
         self.refresh_task: Optional[asyncio.Task] = None
+        
+        self.fernet: Optional[Fernet] = None
+        if key := settings.get("credentials_encryption_key"):
+            logger.info("[CredManager] Encryption key provided. Encrypting credentials file.")
+            derived_key = _derive_key(key)
+            self.fernet = Fernet(derived_key)
 
     def _read_file(self) -> List[Dict[str, Any]]:
         path = self.settings["credentials_file"]
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return [data] if isinstance(data, dict) else data
+            with open(path, "rb") as f:
+                raw_data = f.read()
         except FileNotFoundError:
             return []
         except Exception as e:
             logger.error(f"[CredManager] Failed to read credentials file {path}: {e}")
             return []
 
+        if not raw_data:
+            return []
+
+        # 如果提供了密钥，则必须能成功解密
+        if self.fernet:
+            try:
+                decrypted_data = self.fernet.decrypt(raw_data)
+            except InvalidToken:
+                logger.critical("FATAL: Credentials file is encrypted, but the provided key is incorrect or the file is corrupted.")
+                sys.exit(1)
+            except Exception as e:
+                logger.critical(f"FATAL: An unexpected error occurred during decryption: {e}")
+                sys.exit(1)
+        else:
+            # 如果没有提供密钥，则直接使用原始数据
+            decrypted_data = raw_data
+
+        # 尝试解析JSON
+        try:
+            data = json.loads(decrypted_data)
+            return [data] if isinstance(data, dict) else data
+        except json.JSONDecodeError:
+            # 如果没有提供密钥但JSON解析失败，很可能是因为文件是加密的
+            if not self.fernet:
+                logger.critical("FATAL: Failed to decode credentials file. It might be encrypted, but no encryption key was provided.")
+                sys.exit(1)
+            else:
+                # 如果提供了密钥但解析失败，说明解密后的内容不是有效的JSON
+                logger.critical("FATAL: Failed to decode credentials file after decryption. The file is likely corrupted.")
+                sys.exit(1)
+
     def _write_file(self, items: List[Dict[str, Any]]):
         path = self.settings["credentials_file"]
         out: Any = items[0] if len(items) == 1 else items
+        
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(out, f, ensure_ascii=False, indent=2)
+            json_data = json.dumps(out, ensure_ascii=False, indent=2).encode('utf-8')
+            
+            final_data = json_data
+            if self.fernet:
+                final_data = self.fernet.encrypt(json_data)
+            
+            with open(path, "wb") as f:
+                f.write(final_data)
         except Exception as e:
             logger.error(f"[CredManager] Failed to write credentials file {path}: {e}")
 
@@ -226,7 +281,7 @@ class CredentialManager:
             return
         
         mc.project_id = pid
-        logger.debug(f"[CredManager] Updated metadata for {mc.id}: email={email}, project_id={pid}")
+        logger.debug(f"[CredManager] Updated metadata for {mc.id}: email={sanitize_email(email)}, project_id={sanitize_project_id(pid)}")
 
     async def add_or_update_credential(self, new_creds: Credentials) -> Tuple[bool, str]:
         """
@@ -247,7 +302,7 @@ class CredentialManager:
         async with self.lock:
             for existing_cred in self.credentials:
                 if existing_cred.email == new_email and existing_cred.project_id == new_pid:
-                    logger.info(f"[CredManager] Updating existing credential for {new_email} (id: {existing_cred.id}).")
+                    logger.info(f"[CredManager] Updating existing credential for {sanitize_email(new_email)} (id: {existing_cred.id}).")
                     existing_cred.credentials = new_creds
                     existing_cred.status = CredentialStatus.ACTIVE
                     existing_cred.failure_reason = None
@@ -256,7 +311,7 @@ class CredentialManager:
                     self._persist_current_state()
                     return True, "credential_updated"
 
-            logger.info(f"[CredManager] Adding new credential for {new_email}.")
+            logger.info(f"[CredManager] Adding new credential for {sanitize_email(new_email)}.")
             new_id = f"cred-{len(self.credentials)}"
             mc = ManagedCredential(id=new_id, credentials=new_creds, email=new_email, project_id=new_pid)
             self.credentials.append(mc)
@@ -289,11 +344,11 @@ class CredentialManager:
             c.status = CredentialStatus.ACTIVE
             c.last_refreshed_at = datetime.now(timezone.utc)
             c.failure_reason = None
-            logger.info(f"[CredManager] Refreshed credential for {c.email} successfully.")
+            logger.info(f"[CredManager] Refreshed credential for {sanitize_email(c.email)} successfully.")
             self._persist_current_state()
             return True
         except Exception as e:
-            logger.error(f"[CredManager] Refresh failed for {c.email}: {e}")
+            logger.error(f"[CredManager] Refresh failed for {sanitize_email(c.email)}: {e}")
             c.status = CredentialStatus.ERROR
             c.failed_at = datetime.now(timezone.utc)
             c.failure_reason = str(e)
@@ -358,8 +413,8 @@ class CredentialManager:
             
             details.append({
                 "id": c.id,
-                "email": c.email,
-                "project_id": c.project_id,
+                "email": sanitize_email(c.email),
+                "project_id": sanitize_project_id(c.project_id),
                 "status": c.status,
                 "is_available": c.is_available(),
                 "expiry": expiry_str,

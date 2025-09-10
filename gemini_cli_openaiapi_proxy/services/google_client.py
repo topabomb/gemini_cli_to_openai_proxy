@@ -20,6 +20,7 @@ from ..core.config import SettingsDict, CODE_ASSIST_ENDPOINT
 from .credential_manager import CredentialManager, ManagedCredential, CredentialStatus
 from .usage_tracker import UsageTracker
 from ..core.models import get_base_model_name
+from ..utils.sanitizer import sanitize_email
 from ..utils.transformers import gemini_to_openai_response, gemini_to_openai_stream_chunk
 from datetime import datetime, timezone
 
@@ -75,7 +76,7 @@ class GoogleApiClient:
                 return self._create_error_response(f"Request denied by policy: {reason}", 403, is_streaming=False)
             # --- 注入结束 ---
 
-            cred_id_for_log = f"{managed_cred.id}({managed_cred.email or 'N/A'})"
+            cred_id_for_log = f"{managed_cred.id}({sanitize_email(managed_cred.email)})"
             logger.info(f"[ApiClient] Attempt {attempt + 1}/{max_retries} (Non-Streaming): Sending request with {cred_id_for_log}")
 
             try:
@@ -166,7 +167,7 @@ class GoogleApiClient:
                 return
             # --- 注入结束 ---
 
-            cred_id_for_log = f"{managed_cred.id}({managed_cred.email or 'N/A'})"
+            cred_id_for_log = f"{managed_cred.id}({sanitize_email(managed_cred.email)})"
             logger.info(f"[ApiClient] Attempt {attempt + 1}/{max_retries} (Streaming): Sending request with {cred_id_for_log}")
 
             try:

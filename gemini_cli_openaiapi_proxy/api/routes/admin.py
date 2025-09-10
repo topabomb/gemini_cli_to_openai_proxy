@@ -16,42 +16,90 @@ import oauthlib.oauth2.rfc6749.parameters
 
 from ...core.config import CLIENT_ID, CLIENT_SECRET, SCOPES
 from ...services.credential_manager import CredentialManager
-from ..dependencies import get_credential_manager
+from ...services.usage_tracker import UsageTracker
+from ..dependencies import get_credential_manager, get_usage_tracker
 
 router = APIRouter(tags=["Admin & OAuth"])
 
 @router.get("/", response_class=HTMLResponse)
-async def get_admin_ui():
-    """提供一个简单的 HTML 管理界面。"""
-    content = """
+async def get_admin_ui(
+    cred_manager: CredentialManager = Depends(get_credential_manager),
+    usage_tracker: UsageTracker = Depends(get_usage_tracker)
+):
+    """提供一个包含实时统计信息的 HTML 管理界面。"""
+    
+    # 1. 获取并处理凭据统计
+    all_creds = cred_manager.get_all_credential_details()
+    total_creds = len(all_creds)
+    active_creds = sum(1 for c in all_creds if c.get("is_available"))
+    inactive_creds = total_creds - active_creds
+    
+    cred_stats_html = f"""
+        <h2>Credential Pool</h2>
+        <ul>
+            <li>Total Credentials: <strong>{total_creds}</strong></li>
+            <li>Available: <strong>{active_creds}</strong></li>
+            <li>Inactive/Exhausted: <strong>{inactive_creds}</strong></li>
+        </ul>
+    """
+    
+    # 2. 获取并处理用量统计
+    usage_summary = await usage_tracker.get_aggregated_usage_summary()
+    usage_html = "<h2>Usage by Model</h2>"
+    if usage_summary:
+        usage_html += """
+            <table>
+                <thead>
+                    <tr>
+                        <th>Model</th>
+                        <th>Request Count</th>
+                        <th>Total Tokens</th>
+                    </tr>
+                </thead>
+                <tbody>
+        """
+        for model, stats in usage_summary.items():
+            usage_html += f"""
+                <tr>
+                    <td>{model}</td>
+                    <td>{stats.get('successful_requests', 0)}</td>
+                    <td>{stats.get('total_tokens', 0)}</td>
+                </tr>
+            """
+        usage_html += "</tbody></table>"
+    else:
+        usage_html += "<p>No usage data recorded yet.</p>"
+
+    # 3. 组装完整 HTML
+    content = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>Gemini API Proxy Management</title>
-        <style>
-            body { font-family: sans-serif; margin: 2em; }
-            h1, h2 { color: #333; }
-            a { color: #007bff; text-decoration: none; }
-            a:hover { text-decoration: underline; }
-            .container { max-width: 800px; margin: auto; }
-            .card { border: 1px solid #ddd; padding: 1em; margin-bottom: 1em; border-radius: 5px; }
-        </style>
     </head>
     <body>
-        <div class="container">
+        <div>
             <h1>Gemini API Proxy Management</h1>
-            <div class="card">
-                <h2>Add New Credential</h2>
-                <p>Click the link below to start the Google OAuth2 process and add a new credential to the pool.</p>
-                <a href="/oauth2/login"><strong>Start Authentication</strong></a>
+            
+            <div>
+                <h2>Live Statistics</h2>
+                {cred_stats_html}
+                {usage_html}
             </div>
-            <div class="card">
-                <h2>Monitor Service</h2>
-                <p>Check the status of credentials and API usage.</p>
+
+            <div>
+                <h2>Actions</h2>
+                <p>Click the link below to start the Google OAuth2 process and add a new credential to the pool.</p>
+                <a href="/oauth2/login" target="_blank"><strong>Start Authentication</strong></a>
+            </div>
+
+            <div>
+                <h2>Monitoring Endpoints</h2>
+                <p>Check the detailed status of credentials and API usage via JSON endpoints.</p>
                 <ul>
-                    <li><a href="/admin/credentials" target="_blank">View Credentials Status</a></li>
-                    <li><a href="/admin/usage" target="_blank">View Usage Stats</a></li>
-                    <li><a href="/health" target="_blank">Health Check</a></li>
+                    <li><a href="/admin/credentials" >View Credentials Status</a></li>
+                    <li><a href="/admin/usage" >View Usage Stats</a></li>
+                    <li><a href="/health" >Health Check</a></li>
                 </ul>
             </div>
         </div>
@@ -146,8 +194,7 @@ async def get_credentials_status(cred_manager: CredentialManager = Depends(get_c
     return JSONResponse(content=details)
 
 @router.get("/admin/usage")
-async def get_usage_status(request: Request):
+async def get_usage_status(usage_tracker: UsageTracker = Depends(get_usage_tracker)):
     """获取聚合后的用量统计，不暴露任何敏感分组信息。"""
-    usage_tracker = request.app.state.usage_tracker
     summary = await usage_tracker.get_aggregated_usage_summary()
     return JSONResponse(content=summary)

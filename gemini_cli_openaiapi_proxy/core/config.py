@@ -54,6 +54,10 @@ class UsageLoggingSettings(TypedDict):
     interval_sec: int
 
 class SettingsDict(TypedDict):
+    """
+    Represents the fully resolved runtime settings, combining configuration 
+    from a file and command-line arguments.
+    """
     server: ServerSettings
     auth_keys: List[str]
     credentials_file: str
@@ -63,6 +67,7 @@ class SettingsDict(TypedDict):
     usage_logging: UsageLoggingSettings
     public_url: Optional[str]
     min_credentials: int
+    credentials_encryption_key: Optional[str]
 
 # ===== 默认配置 =====
 def _get_default_settings() -> SettingsDict:
@@ -83,10 +88,13 @@ def _get_default_settings() -> SettingsDict:
     }
     return data
 
-def load_settings(config_path: Optional[str] = None) -> SettingsDict:
-    """从指定路径读取配置文件，与默认值合并。"""
+def load_settings(config_path: Optional[str] = None, encryption_key: Optional[str] = None) -> SettingsDict:
+    """
+    从指定路径读取配置文件，并与命令行参数（如加密密钥）合并，生成最终的运行时配置。
+    """
     settings = _get_default_settings()
 
+    # 1. 从文件加载配置
     if config_path and os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
             user_config = json.load(f)
@@ -123,5 +131,8 @@ def load_settings(config_path: Optional[str] = None) -> SettingsDict:
         
         if "min_credentials" in user_config:
             settings["min_credentials"] = int(user_config["min_credentials"])
+
+    # 2. 合并来自命令行的参数
+    settings["credentials_encryption_key"] = encryption_key
 
     return settings

@@ -62,11 +62,42 @@ pip install -r requirements.txt
 ### 4. 启动服务器
 
 ```bash
-# 使用自定义配置启动
-python -m gemini_cli_openaiapi_proxy -c config.json
+# 启动服务 (默认命令)
+python -m gemini_cli_openaiapi_proxy run -c config.json
+
+# (可选) 使用加密功能启动
+python -m gemini_cli_openaiapi_proxy run -c config.json -ek "your-secret-key-here"
 ```
 
 服务器启动后，您可以访问 `http://<your_host>:<your_port>` 来打开 Web 管理界面。
+
+## 安全：加密凭据文件
+
+为了保护您存储在 `credentials.json` 文件中的高权限 `refresh_token`，本项目提供了可选的加密功能。
+
+### 1. 生成加密密钥
+
+我们提供了一个内置命令来生成一个安全的加密密钥。
+
+```bash
+python -m gemini_cli_openaiapi_proxy generate-key
+```
+
+该命令会输出一个类似 `gAAAAABmI...` 的密钥。请**立即将此密钥备份到安全的地方**，例如您的密码管理器中。
+
+> **⚠️ 警告：密钥丢失 = 数据丢失**
+>
+> 如果您丢失了这个密钥，加密后的 `credentials.json` 文件将**永久无法恢复**。您需要删除该文件并为所有账户重新进行网页授权。
+
+### 2. 使用密钥启动服务
+
+在启动服务时，通过 `-ek` 或 `--encryption-key` 参数提供您的密钥。
+
+```bash
+python -m gemini_cli_openaiapi_proxy run -c config.json --encryption-key "your-secret-key-here"
+```
+
+当您首次使用密钥启动时，程序会自动读取现有的明文 `credentials.json`，用您的密钥对其进行加密，然后将加密后的内容写回文件。此后的所有读写操作都将是加密的。
 
 ## API 使用指南 (Usage)
 
