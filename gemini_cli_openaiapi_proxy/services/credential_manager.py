@@ -100,16 +100,20 @@ class ManagedCredential:
     failure_reason: Optional[str] = None
 
     def is_available(self) -> bool:
-        """检查凭据当前是否可用（仅用于轮询，不检查过期）。"""
+        """检查凭据当前是否可用，并在此过程中更新瞬时状态（如过期）。"""
+        # 如果一个凭据的冷静期结束，将其状态恢复为 ACTIVE
         if self.status == CredentialStatus.RATE_LIMITED:
-            if self.rate_limited_until and datetime.now(timezone.utc) < self.rate_limited_until:
-                return False
-            # If cooldown is over, it's not "available" yet, but can be picked up by lazy refresh.
-            # For direct polling, only ACTIVE is truly available.
-            return False 
-        elif self.status != CredentialStatus.ACTIVE:
+            if self.rate_limited_until and datetime.now(timezone.utc) > self.rate_limited_until:
+                self.status = CredentialStatus.ACTIVE
+                self.rate_limited_until = None
+                self.failure_reason = None
+                logger.info(f"Credential for {sanitize_email(self.email)} has recovered from rate limit.")
+        
+        # 只有 ACTIVE 状态的凭据才有可能被使用
+        if self.status != CredentialStatus.ACTIVE:
             return False
         
+        # 检查 ACTIVE 状态的凭据是否已过期
         is_expired = False
         if self.credentials.expiry:
             expiry_utc = self.credentials.expiry if self.credentials.expiry.tzinfo is not None else self.credentials.expiry.replace(tzinfo=timezone.utc)
