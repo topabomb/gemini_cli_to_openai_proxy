@@ -25,7 +25,7 @@ echo "Installing/updating requirements..."
 pip install -r requirements.txt
 
 # Run the Python application
-echo "Starting the Python application with arguments: $@"
-python3 -m gemini_cli_openaiapi_proxy "$@"
+echo "Starting the Python application with 'run' command and arguments: $@"
+python3 -m gemini_cli_openaiapi_proxy run "$@"
 
 echo "Application has finished."
