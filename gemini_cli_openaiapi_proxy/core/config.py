@@ -68,6 +68,8 @@ class SettingsDict(TypedDict):
     public_url: Optional[str]
     min_credentials: int
     credentials_encryption_key: Optional[str]
+    admin_username: Optional[str]
+    admin_password: Optional[str]
 
 # ===== 默认配置 =====
 def _get_default_settings() -> SettingsDict:
@@ -85,6 +87,8 @@ def _get_default_settings() -> SettingsDict:
         "usage_logging": {"enabled": True, "interval_sec": 30},
         "public_url": None,
         "min_credentials": 1,
+        "admin_username": None,
+        "admin_password": None,
     }
     return data
 
@@ -131,6 +135,12 @@ def load_settings(config_path: Optional[str] = None, encryption_key: Optional[st
         
         if "min_credentials" in user_config:
             settings["min_credentials"] = int(user_config["min_credentials"])
+        
+        if "admin_username" in user_config:
+            settings["admin_username"] = user_config["admin_username"]
+        
+        if "admin_password" in user_config:
+            settings["admin_password"] = user_config["admin_password"]
 
     # 2. 合并来自命令行的参数
     settings["credentials_encryption_key"] = encryption_key

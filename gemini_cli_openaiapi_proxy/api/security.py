@@ -4,9 +4,13 @@ API 安全模块：
 """
 
 import base64
+import secrets
 from typing import List
-from fastapi import Request, HTTPException, Security
+from fastapi import Request, HTTPException, Security, Depends
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.security.api_key import APIKeyHeader, APIKeyQuery, APIKeyCookie
+
+# --- API Key Security ---
 
 API_KEY_NAME = "Authorization"
 API_KEY_QUERY_NAME = "key"
@@ -53,5 +57,31 @@ async def get_api_key(
     raise HTTPException(
         status_code=401,
         detail="Invalid or missing API Key. Provide it via 'Authorization: Bearer <key>', 'Authorization: Basic ...', '?key=<key>', or 'x-goog-api-key' header.",
-        headers={"WWW-Authenticate": "Basic"},
     )
+
+# --- Admin Basic Auth Security ---
+
+admin_security = HTTPBasic()
+
+async def verify_admin_access(request: Request, credentials: HTTPBasicCredentials = Depends(admin_security)):
+    """
+    依赖项：验证访问管理页面的 Basic Auth 凭据。
+    """
+    settings = request.app.state.settings
+    admin_user = settings.get("admin_username")
+    admin_pass = settings.get("admin_password")
+
+    # 如果未配置管理员用户或密码，则禁用认证
+    if not admin_user or not admin_pass:
+        return True
+
+    is_user_correct = secrets.compare_digest(credentials.username, admin_user)
+    is_pass_correct = secrets.compare_digest(credentials.password, admin_pass)
+
+    if not (is_user_correct and is_pass_correct):
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return True

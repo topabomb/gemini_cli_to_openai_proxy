@@ -18,8 +18,12 @@ from ...core.config import CLIENT_ID, CLIENT_SECRET, SCOPES
 from ...services.credential_manager import CredentialManager
 from ...services.usage_tracker import UsageTracker
 from ..dependencies import get_credential_manager, get_usage_tracker
+from ..security import verify_admin_access
 
-router = APIRouter(tags=["Admin & OAuth"])
+router = APIRouter(
+    tags=["Admin & OAuth"],
+    dependencies=[Depends(verify_admin_access)]
+)
 
 @router.get("/", response_class=HTMLResponse)
 async def get_admin_ui(

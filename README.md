@@ -29,7 +29,35 @@ pip install -r requirements.txt
 
 ### 3. 配置
 
-在项目根目录创建一个 `config.json` 文件来配置代理服务器。
+在项目根目录创建一个 `config.json` 文件来配置代理服务器。下面是一个完整的配置范例：
+
+```json
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8888
+  },
+  "auth_keys": ["your-secret-key-1", "your-secret-key-2"],
+  "credentials_file": "credentials.json",
+  "project_id_map": {
+    "user1@gmail.com": "your-gcp-project-id-1",
+    "user2@gmail.com": "your-gcp-project-id-2"
+  },
+  "log_level": "INFO",
+  "request_timeouts": {
+    "connect": 60,
+    "read": 90
+  },
+  "usage_logging": {
+    "enabled": true,
+    "interval_sec": 300
+  },
+  "public_url": null,
+  "min_credentials": 1,
+  "admin_username": "admin",
+  "admin_password": "your_secure_password"
+}
+```
 
 > **⚠️ 注意：配置文件不会自动加载**
 >
@@ -57,6 +85,8 @@ pip install -r requirements.txt
 | `log_level` | `string` | 日志级别 (DEBUG, INFO, WARNING, ERROR)。 | `"debug"` |
 | `request_timeouts` | `dict` | 对上游 Google API 的请求超时（秒）。 | `{"connect": 60, "read": 90}` |
 | `usage_logging` | `dict` | 用量统计日志配置。 | `{"enabled": true, "interval_sec": 30}` |
+| `admin_username` | `string` (可选) | 为管理后台设置一个用户名以启用密码保护。 | `null` |
+| `admin_password` | `string` (可选) | 为管理后台设置一个密码。 | `null` |
 
 
 ### 4. 启动服务器

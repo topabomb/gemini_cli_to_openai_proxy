@@ -19,5 +19,7 @@
     "interval_sec": 300
   },
   "public_url": null,
-  "min_credentials": 1
+  "min_credentials": 1,
+  "admin_username": null,
+  "admin_password": null
 }
