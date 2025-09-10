@@ -5,7 +5,7 @@ API 安全模块：
 
 import base64
 import secrets
-from typing import List
+from typing import List, Optional
 from fastapi import Request, HTTPException, Security, Depends
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.security.api_key import APIKeyHeader, APIKeyQuery, APIKeyCookie
@@ -61,20 +61,30 @@ async def get_api_key(
 
 # --- Admin Basic Auth Security ---
 
-admin_security = HTTPBasic()
+admin_security = HTTPBasic(auto_error=False)
 
-async def verify_admin_access(request: Request, credentials: HTTPBasicCredentials = Depends(admin_security)):
+async def verify_admin_access(request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(admin_security)):
     """
     依赖项：验证访问管理页面的 Basic Auth 凭据。
+    如果未在配置中设置 admin_username 和 admin_password，则跳过验证。
     """
     settings = request.app.state.settings
     admin_user = settings.get("admin_username")
     admin_pass = settings.get("admin_password")
 
-    # 如果未配置管理员用户或密码，则禁用认证
+    # 如果未配置管理员用户或密码，则认证被禁用
     if not admin_user or not admin_pass:
         return True
 
+    # 如果已配置但未提供凭据，则触发浏览器登录框
+    if credentials is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Admin credentials are required",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+    # 验证凭据
     is_user_correct = secrets.compare_digest(credentials.username, admin_user)
     is_pass_correct = secrets.compare_digest(credentials.password, admin_pass)
 
@@ -84,4 +94,5 @@ async def verify_admin_access(request: Request, credentials: HTTPBasicCredential
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Basic"},
         )
+    
     return True

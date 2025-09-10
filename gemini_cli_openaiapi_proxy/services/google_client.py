@@ -110,21 +110,22 @@ class GoogleApiClient:
                 failure_reason = str(e.response.status_code)
 
                 if e.response.status_code == 429 and attempt < max_retries - 1:
-                    log_msg += " Rotating credential and retrying."
+                    log_msg += " Marking credential as RATE_LIMITED and retrying."
                     logger.warning(log_msg)
                     await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
-                    managed_cred.mark_failed(reason=failure_reason)
+                    managed_cred.mark_rate_limited()
                     continue
                 elif e.response.status_code == 403 and attempt < max_retries - 1:
-                    log_msg += f" Marking credential as ERROR due to 403 and trying next."
+                    log_msg += f" Marking credential as PERMISSION_DENIED and retrying."
                     logger.warning(log_msg)
                     await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
-                    managed_cred.mark_failed(reason=failure_reason)
+                    managed_cred.mark_permission_denied()
                     continue
                 else:
                     log_msg += " Max retries reached or error is not recoverable."
                     logger.error(log_msg)
                     await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
+                    managed_cred.mark_as_permanent_error(f"HTTP {e.response.status_code}")
                     error_text = await e.response.aread()
                     return self._create_error_response(f"API request failed: {error_text.decode(errors='ignore')}", e.response.status_code, is_streaming=False)
             
@@ -218,21 +219,22 @@ class GoogleApiClient:
                 failure_reason = str(e.response.status_code)
 
                 if e.response.status_code == 429 and attempt < max_retries - 1:
-                    log_msg += " Rotating credential and retrying."
+                    log_msg += " Marking credential as RATE_LIMITED and retrying."
                     logger.warning(log_msg)
                     await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
-                    managed_cred.mark_failed(reason=failure_reason)
+                    managed_cred.mark_rate_limited()
                     continue  # 进行下一次重试
                 elif e.response.status_code == 403 and attempt < max_retries - 1:
-                    log_msg += f" Marking credential as ERROR due to 403 and trying next."
+                    log_msg += f" Marking credential as PERMISSION_DENIED and retrying."
                     logger.warning(log_msg)
                     await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
-                    managed_cred.mark_failed(reason=failure_reason)
+                    managed_cred.mark_permission_denied()
                     continue # 进行下一次重试
                 else:
                     log_msg += " Max retries reached or error is not recoverable."
                     logger.error(log_msg)
                     await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
+                    managed_cred.mark_as_permanent_error(f"HTTP {e.response.status_code}")
                     yield self._create_error_sse_chunk(f"API request failed with status {e.response.status_code}", e.response.status_code)
                     return
             

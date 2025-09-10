@@ -75,8 +75,9 @@ class CredentialStatus:
     ACTIVE = "active"
     EXPIRED = "expired"
     REFRESHING = "refreshing"
-    EXHAUSTED = "exhausted"
-    ERROR = "error"
+    RATE_LIMITED = "rate_limited"  # 429
+    PERMISSION_DENIED = "permission_denied"  # 403
+    ERROR = "error"  # Unrecoverable
 
 @dataclass
 class ManagedCredential:
@@ -99,10 +100,8 @@ class ManagedCredential:
     failure_reason: Optional[str] = None
 
     def is_available(self) -> bool:
-        """检查凭据当前是否可用。"""
-        if self.status in [CredentialStatus.EXPIRED, CredentialStatus.ERROR, CredentialStatus.REFRESHING]:
-            return False
-        if self.status == CredentialStatus.EXHAUSTED and self.exhausted_until and datetime.now(timezone.utc) < self.exhausted_until:
+        """检查凭据当前是否可用（仅用于轮询，不检查过期）。"""
+        if self.status != CredentialStatus.ACTIVE:
             return False
         
         is_expired = False
@@ -119,18 +118,21 @@ class ManagedCredential:
         self.last_used_at = datetime.now(timezone.utc)
         self.usage_count += 1
 
-    def mark_exhausted(self, minutes: int = 30):
-        self.status = CredentialStatus.EXHAUSTED
+    def mark_rate_limited(self, minutes: int = 30):
+        self.status = CredentialStatus.RATE_LIMITED
         self.exhausted_until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        self.failure_reason = "429 Too Many Requests"
+        self.failed_at = datetime.now(timezone.utc)
 
-    def mark_failed(self, reason: str):
-        """根据失败原因更新凭据状态。"""
-        if reason == "429":
-            self.mark_exhausted()
-        else:
-            self.status = CredentialStatus.ERROR
-            self.failure_reason = f"HTTP Error {reason}"
-            self.failed_at = datetime.now(timezone.utc)
+    def mark_permission_denied(self):
+        self.status = CredentialStatus.PERMISSION_DENIED
+        self.failure_reason = "403 Forbidden"
+        self.failed_at = datetime.now(timezone.utc)
+
+    def mark_as_permanent_error(self, reason: str):
+        self.status = CredentialStatus.ERROR
+        self.failure_reason = reason
+        self.failed_at = datetime.now(timezone.utc)
 
 # ===== 主服务类 =====
 
@@ -323,6 +325,7 @@ class CredentialManager:
             n = len(self.credentials)
             if n == 0: return None
 
+            # 优先轮询完全可用的凭据
             for _ in range(n):
                 c = self.credentials[self.current_index]
                 self.current_index = (self.current_index + 1) % n
@@ -330,11 +333,24 @@ class CredentialManager:
                     c.mark_used()
                     return c
             
-            for c in self.credentials:
-                if c.status == CredentialStatus.EXPIRED and c.credentials.refresh_token:
+            # 如果没有完全可用的，则按优先级尝试懒汉式刷新
+            # 优先级: 权限问题 > 用量问题 > 过期问题
+            refresh_candidates = sorted(
+                [c for c in self.credentials if c.credentials.refresh_token],
+                key=lambda c: (
+                    c.status != CredentialStatus.PERMISSION_DENIED, # False is sorted before True
+                    c.status != CredentialStatus.RATE_LIMITED,
+                    c.status != CredentialStatus.EXPIRED
+                )
+            )
+
+            for c in refresh_candidates:
+                if c.status in [CredentialStatus.PERMISSION_DENIED, CredentialStatus.RATE_LIMITED, CredentialStatus.EXPIRED]:
+                    logger.info(f"[CredManager] On-demand refresh attempt for {sanitize_email(c.email)} in state {c.status}")
                     if await self._refresh_credential(c):
                         c.mark_used()
                         return c
+            
             return None
 
     async def _refresh_credential(self, c: ManagedCredential) -> bool:
@@ -349,9 +365,7 @@ class CredentialManager:
             return True
         except Exception as e:
             logger.error(f"[CredManager] Refresh failed for {sanitize_email(c.email)}: {e}")
-            c.status = CredentialStatus.ERROR
-            c.failed_at = datetime.now(timezone.utc)
-            c.failure_reason = str(e)
+            c.mark_as_permanent_error(str(e))
             return False
 
     async def _refresh_credential_object(self, creds: Credentials):
@@ -366,15 +380,31 @@ class CredentialManager:
     async def _refresh_loop(self):
         while True:
             try:
-                logger.debug("[CredManager] Running periodic credential refresh check...")
+                logger.debug("[CredManager] Running periodic credential recovery and refresh check...")
                 async with self.lock:
                     for c in self.credentials:
-                        if c.credentials.expiry:
+                        if not c.credentials.refresh_token:
+                            continue
+
+                        # 1. 优先处理需要立即刷新的状态
+                        if c.status in [CredentialStatus.PERMISSION_DENIED]:
+                            logger.info(f"[CredManager] Proactively refreshing credential for {sanitize_email(c.email)} due to status: {c.status}")
+                            await self._refresh_credential(c)
+                            continue # 处理完一个就进入下一个循环，避免重复操作
+
+                        # 2. 处理已度过冷静期的速率限制状态
+                        if c.status == CredentialStatus.RATE_LIMITED and c.exhausted_until and datetime.now(timezone.utc) > c.exhausted_until:
+                            logger.info(f"[CredManager] Credential for {sanitize_email(c.email)} has recovered from rate limit, attempting refresh.")
+                            await self._refresh_credential(c)
+                            continue
+                        
+                        # 3. 处理即将过期的活跃凭据
+                        if c.status == CredentialStatus.ACTIVE and c.credentials.expiry:
                             expiry_utc = c.credentials.expiry if c.credentials.expiry.tzinfo is not None else c.credentials.expiry.replace(tzinfo=timezone.utc)
                             if expiry_utc < datetime.now(timezone.utc) + timedelta(minutes=10):
-                                if c.credentials.refresh_token and c.status == CredentialStatus.ACTIVE:
-                                    await self._refresh_credential(c)
-                
+                                logger.info(f"[CredManager] Proactively refreshing near-expiry credential for {sanitize_email(c.email)}.")
+                                await self._refresh_credential(c)
+
                 base_interval = 300
                 # 在基础间隔的 50% 到 100% 之间随机选择延迟时间
                 delay = base_interval * random.uniform(0.5, 1.0)
