@@ -80,6 +80,30 @@ class UsageTracker:
                 return obj
             return custom_serializer(self.usage_data)
 
+    async def get_aggregated_usage_summary(self) -> Dict[str, Any]:
+        """获取按模型聚合的用量数据快照，用于 API 端点，不暴露 auth_key。"""
+        async with self.lock:
+            model_summary_stats: Dict[str, ModelStats] = defaultdict(ModelStats)
+            for auth_stats in self.usage_data.values():
+                for cred_stats in auth_stats.values():
+                    for model_name, stats in cred_stats.items():
+                        model_summary_stats[model_name].successful_requests += stats.successful_requests
+                        model_summary_stats[model_name].total_tokens += stats.total_tokens
+                        model_summary_stats[model_name].prompt_tokens += stats.prompt_tokens
+                        model_summary_stats[model_name].candidates_tokens += stats.candidates_tokens
+                        model_summary_stats[model_name].thoughts_tokens += stats.thoughts_tokens
+                        for reason, count in stats.failed_requests.items():
+                            model_summary_stats[model_name].failed_requests[reason] += count
+            
+            # 使用与 get_usage_snapshot 相同的序列化器
+            def custom_serializer(obj):
+                if isinstance(obj, (defaultdict, dict)):
+                    return {k: custom_serializer(v) for k, v in obj.items()}
+                if hasattr(obj, "__dict__"):
+                    return custom_serializer(obj.__dict__)
+                return obj
+            return custom_serializer(model_summary_stats)
+
     async def check_request_allowed(
         self, auth_key: str, cred_id: str, model_name: str
     ) -> Tuple[bool, str]:

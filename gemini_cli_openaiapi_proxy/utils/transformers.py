@@ -62,9 +62,18 @@ def gemini_to_openai_response(gemini_response: Dict[str, Any], model: str) -> Di
 def gemini_to_openai_stream_chunk(gemini_chunk: Dict[str, Any], model: str, response_id: str, is_first_chunk: bool) -> Dict[str, Any]:
     """将 Gemini 的流式块转换为 OpenAI 的流式块。"""
     choices = []
-    for candidate in gemini_chunk.get("candidates", []):
+    response_obj = gemini_chunk.get("response", {})
+    for candidate in response_obj.get("candidates", []):
         delta = {}
-        content = "".join(part.get("text", "") for part in candidate.get("content", {}).get("parts", []))
+        
+        # 过滤掉 "thought" part
+        text_parts = [
+            part.get("text", "")
+            for part in candidate.get("content", {}).get("parts", [])
+            if "thought" not in part
+        ]
+        content = "".join(text_parts)
+
         if content:
             delta["content"] = content
         

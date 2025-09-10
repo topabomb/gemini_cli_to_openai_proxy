@@ -14,12 +14,13 @@ from typing import Dict, Any, AsyncGenerator
 
 import httpx
 from fastapi import Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 
 from ..core.config import SettingsDict, CODE_ASSIST_ENDPOINT
 from .credential_manager import CredentialManager, ManagedCredential, CredentialStatus
 from .usage_tracker import UsageTracker
 from ..core.models import get_base_model_name
+from ..utils.transformers import gemini_to_openai_response, gemini_to_openai_stream_chunk
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -48,9 +49,9 @@ class GoogleApiClient:
             )
         else:
             # 对于非流式请求，使用现有的 try-except-retry 模式
-            return await self._non_streaming_request_with_retries(auth_key, model, gemini_request)
+            return await self._non_streaming_request_with_retries(auth_key, model, gemini_request, compat_openai)
 
-    async def _non_streaming_request_with_retries(self, auth_key: str, model: str, gemini_request: Dict[str, Any]) -> Response:
+    async def _non_streaming_request_with_retries(self, auth_key: str, model: str, gemini_request: Dict[str, Any], compat_openai: bool) -> Response:
         """处理非流式请求的重试逻辑。"""
         max_retries = 3
         last_error = None
@@ -92,18 +93,29 @@ class GoogleApiClient:
                     response_obj = json_data.get("response", {})
                     usage_metadata = response_obj.get("usageMetadata")
                     await self.usage_tracker.record_successful_request(auth_key, managed_cred.id, model, usage_metadata or {})
+                    
+                    if compat_openai:
+                        openai_response = gemini_to_openai_response(json_data, model)
+                        return JSONResponse(content=openai_response, status_code=200)
                 except json.JSONDecodeError:
                     logger.warning("[ApiClient] Failed to parse non-stream response for usage tracking.")
                     await self.usage_tracker.record_successful_request(auth_key, managed_cred.id, model, {})
-                
+
                 return Response(content=response_data, status_code=resp.status_code, media_type=resp.headers.get("Content-Type"))
 
             except httpx.HTTPStatusError as e:
                 last_error = e
                 log_msg = f"[ApiClient] Request failed with status {e.response.status_code} for {cred_id_for_log}."
                 failure_reason = str(e.response.status_code)
-                if e.response.status_code in [429, 403] and attempt < max_retries - 1:
+
+                if e.response.status_code == 429 and attempt < max_retries - 1:
                     log_msg += " Rotating credential and retrying."
+                    logger.warning(log_msg)
+                    await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
+                    managed_cred.mark_failed(reason=failure_reason)
+                    continue
+                elif e.response.status_code == 403 and attempt < max_retries - 1:
+                    log_msg += f" Marking credential as ERROR due to 403 and trying next."
                     logger.warning(log_msg)
                     await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
                     managed_cred.mark_failed(reason=failure_reason)
@@ -130,6 +142,8 @@ class GoogleApiClient:
         """
         max_retries = 3
         last_error = None
+        response_id = f"chatcmpl-{uuid.uuid4()}"
+        is_first_chunk = True
 
         for attempt in range(max_retries):
             managed_cred = await self.cred_manager.get_available()
@@ -164,7 +178,7 @@ class GoogleApiClient:
                     if resp.status_code != 200:
                         resp.raise_for_status()
 
-                    # --- 核心流式转发逻辑 (保持不变) ---
+                    # --- 核心流式转发逻辑 ---
                     async for line in resp.aiter_lines():
                         if not line:
                             continue
@@ -178,7 +192,10 @@ class GoogleApiClient:
                                     usage_metadata = response_obj["usageMetadata"]
                                 
                                 if compat_openai:
-                                    yield self._transform_chunk_to_openai_format(obj, model)
+                                    openai_chunk = gemini_to_openai_stream_chunk(obj, model, response_id, is_first_chunk)
+                                    yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+                                    if is_first_chunk:
+                                        is_first_chunk = False
                                 else:
                                     yield f"data: {json.dumps(response_obj or obj, separators=(',', ':'))}\n\n".encode("utf-8")
                             except json.JSONDecodeError:
@@ -198,8 +215,15 @@ class GoogleApiClient:
                 last_error = e
                 log_msg = f"[ApiClient] Request failed with status {e.response.status_code} for {cred_id_for_log}."
                 failure_reason = str(e.response.status_code)
-                if e.response.status_code in [429, 403] and attempt < max_retries - 1:
+
+                if e.response.status_code == 429 and attempt < max_retries - 1:
                     log_msg += " Rotating credential and retrying."
+                    logger.warning(log_msg)
+                    await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
+                    managed_cred.mark_failed(reason=failure_reason)
+                    continue  # 进行下一次重试
+                elif e.response.status_code == 403 and attempt < max_retries - 1:
+                    log_msg += f" Marking credential as ERROR due to 403 and trying next."
                     logger.warning(log_msg)
                     await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
                     managed_cred.mark_failed(reason=failure_reason)
@@ -235,32 +259,15 @@ class GoogleApiClient:
             target_url += "?alt=sse"
             
         timeouts = self.settings["request_timeouts"]
-        timeout_config = httpx.Timeout(timeouts["connect"], read=timeouts["read"])
+        timeout_config = httpx.Timeout(
+            connect=timeouts.get("connect"),
+            read=timeouts.get("read"),
+            write=timeouts.get("write"),
+            pool=timeouts.get("pool"),
+        )
         
         logger.debug(f"[ApiClient] Sending request to {target_url} with body: {post_data}")
         return post_data, target_url, headers, timeout_config
-
-    def _transform_chunk_to_openai_format(self, obj: Dict[str, Any], model: str) -> bytes:
-        """将 Gemini 的数据块转换为 OpenAI 格式的 SSE 字节。"""
-        text_delta = ""
-        response_obj = obj.get("response", {})
-        candidates = response_obj.get("candidates") or []
-        if isinstance(candidates, list) and candidates:
-            content = candidates[0].get("content") or {}
-            parts = content.get("parts") or []
-            texts = [p.get("text") for p in parts if isinstance(p.get("text"), str)]
-            if texts:
-                text_delta = "".join(texts)
-
-        created = int(time.time())
-        chunk_obj = {
-            "id": f"gemini-{created}",
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": {"content": text_delta} if text_delta else {}, "finish_reason": None}],
-        }
-        return f"data: {json.dumps(chunk_obj, ensure_ascii=False)}\n\n".encode("utf-8")
 
     def _create_error_response(self, message: str, status_code: int, is_streaming: bool) -> Response:
         """为非流式请求创建统一的错误响应。"""

@@ -5,8 +5,28 @@
 """
 
 import logging
+from typing import Dict, Any
 from fastapi import Request
 from fastapi.responses import JSONResponse
+
+SENSITIVE_HEADERS = {
+    "authorization",
+    "cookie",
+    "x-goog-api-key",
+    "x-iam-authorization-token",
+}
+
+def _sanitize_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    过滤敏感的请求头信息。
+    """
+    sanitized = {}
+    for key, value in headers.items():
+        if key.lower() in SENSITIVE_HEADERS:
+            sanitized[key] = "[REDACTED]"
+        else:
+            sanitized[key] = value
+    return sanitized
 
 async def generic_exception_handler(request: Request, exc: Exception):
     """
@@ -17,7 +37,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
         exc_info=True,  # 包含完整的 traceback
         extra={
             "client": request.client,
-            "headers": dict(request.headers),
+            "headers": _sanitize_headers(dict(request.headers)),
         }
     )
     return JSONResponse(

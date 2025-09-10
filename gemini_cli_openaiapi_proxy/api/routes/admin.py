@@ -147,7 +147,7 @@ async def get_credentials_status(cred_manager: CredentialManager = Depends(get_c
 
 @router.get("/admin/usage")
 async def get_usage_status(request: Request):
-    """获取用量统计。"""
+    """获取聚合后的用量统计，不暴露任何敏感分组信息。"""
     usage_tracker = request.app.state.usage_tracker
-    summary = await usage_tracker.get_usage_snapshot()
+    summary = await usage_tracker.get_aggregated_usage_summary()
     return JSONResponse(content=summary)
