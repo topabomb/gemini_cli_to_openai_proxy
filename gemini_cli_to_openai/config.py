@@ -23,7 +23,6 @@ CLIENT_SECRET = base64.b64decode(_ENCODED_CLIENT_SECRET).decode(
     "utf-8"
 )  # Google OAuth 2.0 客户端密钥 (Client Secret)
 SCOPES: List[str] = [
-    "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
