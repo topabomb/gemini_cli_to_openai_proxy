@@ -1,0 +1,273 @@
+"""
+Google API 异步客户端服务模块：
+- 使用 httpx.AsyncClient 实现全异步请求。
+- 统一从 CredentialManager 获取凭据。
+- 处理非流式与流式（SSE）转发逻辑、超时、429/403 重试与轮转策略。
+- 解析响应并记录用量统计。
+"""
+import json
+import logging
+import asyncio
+import time
+import uuid
+from typing import Dict, Any, AsyncGenerator
+
+import httpx
+from fastapi import Response
+from fastapi.responses import StreamingResponse
+
+from ..core.config import SettingsDict, CODE_ASSIST_ENDPOINT
+from .credential_manager import CredentialManager, ManagedCredential, CredentialStatus
+from .usage_tracker import UsageTracker
+from ..core.models import get_base_model_name
+from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
+
+class GoogleApiClient:
+    """
+    一个全异步的 Google API 客户端。
+    """
+
+    def __init__(self, settings: SettingsDict, cred_manager: CredentialManager, http_client: httpx.AsyncClient, usage_tracker: UsageTracker):
+        self.settings = settings
+        self.cred_manager = cred_manager
+        self.http_client = http_client
+        self.usage_tracker = usage_tracker
+
+    async def send_gemini_request(self, auth_key: str, model: str, gemini_request: Dict[str, Any], is_streaming: bool, compat_openai: bool = False) -> Response:
+        """
+        异步发送请求到 Google Gemini API，并处理重试和凭据轮转。
+        """
+        if is_streaming:
+            # 对于流式请求，返回一个包含完整重试逻辑的 StreamingResponse
+            return StreamingResponse(
+                self._streaming_request_with_retries(auth_key, model, gemini_request, compat_openai),
+                media_type="text/event-stream; charset=utf-8",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+            )
+        else:
+            # 对于非流式请求，使用现有的 try-except-retry 模式
+            return await self._non_streaming_request_with_retries(auth_key, model, gemini_request)
+
+    async def _non_streaming_request_with_retries(self, auth_key: str, model: str, gemini_request: Dict[str, Any]) -> Response:
+        """处理非流式请求的重试逻辑。"""
+        max_retries = 3
+        last_error = None
+        
+        for attempt in range(max_retries):
+            managed_cred = await self.cred_manager.get_available()
+            if not managed_cred:
+                logger.error("[ApiClient] No valid credentials available for non-streaming request.")
+                return self._create_error_response("No valid credentials available.", 500, is_streaming=False)
+
+            # --- 注入请求策略检查 ---
+            is_allowed, reason = await self.usage_tracker.check_request_allowed(
+                auth_key=auth_key,
+                cred_id=managed_cred.id,
+                model_name=model
+            )
+            if not is_allowed:
+                log_msg = f"[ApiClient] Request denied by policy for {auth_key}/{managed_cred.id}/{model}. Reason: {reason}"
+                logger.warning(log_msg)
+                await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, f"Denied: {reason}")
+                return self._create_error_response(f"Request denied by policy: {reason}", 403, is_streaming=False)
+            # --- 注入结束 ---
+
+            cred_id_for_log = f"{managed_cred.id}({managed_cred.email or 'N/A'})"
+            logger.info(f"[ApiClient] Attempt {attempt + 1}/{max_retries} (Non-Streaming): Sending request with {cred_id_for_log}")
+
+            try:
+                # 构造请求
+                post_data, target_url, headers, timeout_config = self._prepare_request_components(managed_cred, model, gemini_request, is_streaming=False)
+                
+                # 发送请求
+                resp = await self.http_client.post(target_url, content=post_data, headers=headers, timeout=timeout_config)
+                resp.raise_for_status()
+
+                # 处理成功响应
+                response_data = await resp.aread()
+                try:
+                    json_data = json.loads(response_data)
+                    response_obj = json_data.get("response", {})
+                    usage_metadata = response_obj.get("usageMetadata")
+                    await self.usage_tracker.record_successful_request(auth_key, managed_cred.id, model, usage_metadata or {})
+                except json.JSONDecodeError:
+                    logger.warning("[ApiClient] Failed to parse non-stream response for usage tracking.")
+                    await self.usage_tracker.record_successful_request(auth_key, managed_cred.id, model, {})
+                
+                return Response(content=response_data, status_code=resp.status_code, media_type=resp.headers.get("Content-Type"))
+
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                log_msg = f"[ApiClient] Request failed with status {e.response.status_code} for {cred_id_for_log}."
+                failure_reason = str(e.response.status_code)
+                if e.response.status_code in [429, 403] and attempt < max_retries - 1:
+                    log_msg += " Rotating credential and retrying."
+                    logger.warning(log_msg)
+                    await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
+                    managed_cred.mark_failed(reason=failure_reason)
+                    continue
+                else:
+                    log_msg += " Max retries reached or error is not recoverable."
+                    logger.error(log_msg)
+                    await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
+                    error_text = await e.response.aread()
+                    return self._create_error_response(f"API request failed: {error_text.decode(errors='ignore')}", e.response.status_code, is_streaming=False)
+            
+            except Exception as e:
+                last_error = e
+                logger.error(f"[ApiClient] An unexpected error occurred: {e}. Credential: {cred_id_for_log}", exc_info=True)
+                await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason="Exception")
+                return self._create_error_response(f"An unexpected error occurred: {e}", 500, is_streaming=False)
+        
+        logger.error(f"[ApiClient] All retries failed for non-streaming request. Last error: {last_error}")
+        return self._create_error_response("Request failed after all retries.", 500, is_streaming=False)
+
+    async def _streaming_request_with_retries(self, auth_key: str, model: str, gemini_request: Dict[str, Any], compat_openai: bool) -> AsyncGenerator[bytes, None]:
+        """
+        一个包含完整重试逻辑的异步生成器，用于处理流式请求。
+        """
+        max_retries = 3
+        last_error = None
+
+        for attempt in range(max_retries):
+            managed_cred = await self.cred_manager.get_available()
+            if not managed_cred:
+                logger.error("[ApiClient] No valid credentials available for streaming request.")
+                yield self._create_error_sse_chunk("No valid credentials available.", 500)
+                return
+
+            # --- 注入请求策略检查 ---
+            is_allowed, reason = await self.usage_tracker.check_request_allowed(
+                auth_key=auth_key,
+                cred_id=managed_cred.id,
+                model_name=model
+            )
+            if not is_allowed:
+                log_msg = f"[ApiClient] Request denied by policy for {auth_key}/{managed_cred.id}/{model}. Reason: {reason}"
+                logger.warning(log_msg)
+                await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, f"Denied: {reason}")
+                yield self._create_error_sse_chunk(f"Request denied by policy: {reason}", 403)
+                return
+            # --- 注入结束 ---
+
+            cred_id_for_log = f"{managed_cred.id}({managed_cred.email or 'N/A'})"
+            logger.info(f"[ApiClient] Attempt {attempt + 1}/{max_retries} (Streaming): Sending request with {cred_id_for_log}")
+
+            try:
+                post_data, target_url, headers, timeout_config = self._prepare_request_components(managed_cred, model, gemini_request, is_streaming=True)
+                
+                usage_metadata: Dict[str, Any] = {}
+                async with self.http_client.stream("POST", target_url, content=post_data, headers=headers, timeout=timeout_config) as resp:
+                    # 如果状态码不是 200，则直接进入异常处理逻辑，以便重试
+                    if resp.status_code != 200:
+                        resp.raise_for_status()
+
+                    # --- 核心流式转发逻辑 (保持不变) ---
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        if line.startswith("data: "):
+                            chunk_data = line[len("data: "):]
+                            try:
+                                obj = json.loads(chunk_data)
+                                logger.debug(f"[ApiClient] Stream chunk received: {obj}")
+                                response_obj = obj.get("response", {})
+                                if "usageMetadata" in response_obj and "totalTokenCount" in response_obj["usageMetadata"]:
+                                    usage_metadata = response_obj["usageMetadata"]
+                                
+                                if compat_openai:
+                                    yield self._transform_chunk_to_openai_format(obj, model)
+                                else:
+                                    yield f"data: {json.dumps(response_obj or obj, separators=(',', ':'))}\n\n".encode("utf-8")
+                            except json.JSONDecodeError:
+                                logger.warning(f"[ApiClient] Failed to decode stream chunk as JSON: {chunk_data}")
+                                yield (line + "\n").encode("utf-8")
+                        else:
+                            yield (line + "\n").encode("utf-8")
+                    # --- 核心流式转发逻辑结束 ---
+
+                # 流成功结束
+                if compat_openai:
+                    yield b"data: [DONE]\n\n"
+                await self.usage_tracker.record_successful_request(auth_key, managed_cred.id, model, usage_metadata)
+                return # 成功，退出生成器
+
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                log_msg = f"[ApiClient] Request failed with status {e.response.status_code} for {cred_id_for_log}."
+                failure_reason = str(e.response.status_code)
+                if e.response.status_code in [429, 403] and attempt < max_retries - 1:
+                    log_msg += " Rotating credential and retrying."
+                    logger.warning(log_msg)
+                    await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
+                    managed_cred.mark_failed(reason=failure_reason)
+                    continue # 进行下一次重试
+                else:
+                    log_msg += " Max retries reached or error is not recoverable."
+                    logger.error(log_msg)
+                    await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
+                    yield self._create_error_sse_chunk(f"API request failed with status {e.response.status_code}", e.response.status_code)
+                    return
+            
+            except Exception as e:
+                last_error = e
+                logger.error(f"[ApiClient] An unexpected error occurred during stream: {e}. Credential: {cred_id_for_log}", exc_info=True)
+                await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason="Exception")
+                yield self._create_error_sse_chunk(f"An unexpected error occurred: {e}", 500)
+                return
+
+        logger.error(f"[ApiClient] All retries failed for streaming request. Last error: {last_error}")
+        yield self._create_error_sse_chunk("Request failed after all retries.", 500)
+
+    def _prepare_request_components(self, managed_cred: ManagedCredential, model: str, gemini_request: Dict[str, Any], is_streaming: bool) -> tuple:
+        """准备请求所需的各种组件。"""
+        creds = managed_cred.credentials
+        headers = {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
+        
+        final_payload = {"model": get_base_model_name(model), "project": managed_cred.project_id, "request": gemini_request}
+        post_data = json.dumps(final_payload)
+        
+        action = "streamGenerateContent" if is_streaming else "generateContent"
+        target_url = f"{CODE_ASSIST_ENDPOINT}/v1internal:{action}"
+        if is_streaming:
+            target_url += "?alt=sse"
+            
+        timeouts = self.settings["request_timeouts"]
+        timeout_config = httpx.Timeout(timeouts["connect"], read=timeouts["read"])
+        
+        logger.debug(f"[ApiClient] Sending request to {target_url} with body: {post_data}")
+        return post_data, target_url, headers, timeout_config
+
+    def _transform_chunk_to_openai_format(self, obj: Dict[str, Any], model: str) -> bytes:
+        """将 Gemini 的数据块转换为 OpenAI 格式的 SSE 字节。"""
+        text_delta = ""
+        response_obj = obj.get("response", {})
+        candidates = response_obj.get("candidates") or []
+        if isinstance(candidates, list) and candidates:
+            content = candidates[0].get("content") or {}
+            parts = content.get("parts") or []
+            texts = [p.get("text") for p in parts if isinstance(p.get("text"), str)]
+            if texts:
+                text_delta = "".join(texts)
+
+        created = int(time.time())
+        chunk_obj = {
+            "id": f"gemini-{created}",
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"content": text_delta} if text_delta else {}, "finish_reason": None}],
+        }
+        return f"data: {json.dumps(chunk_obj, ensure_ascii=False)}\n\n".encode("utf-8")
+
+    def _create_error_response(self, message: str, status_code: int, is_streaming: bool) -> Response:
+        """为非流式请求创建统一的错误响应。"""
+        error_content = {"error": {"message": message, "code": status_code}}
+        return Response(content=json.dumps(error_content), status_code=status_code, media_type="application/json")
+
+    def _create_error_sse_chunk(self, message: str, status_code: int) -> bytes:
+        """为流式请求创建格式化的 SSE 错误块。"""
+        error_content = {"error": {"message": message, "code": status_code}}
+        return f"data: {json.dumps(error_content)}\n\n".encode("utf-8")

@@ -1,12 +1,14 @@
 {
-  "server": { "host": "0.0.0.0", "port": 8888 },
-  "auth_keys": ["your-secret-password"],
-  "credentials_file": "credentials.json",
-  "external_credentials_file": null,
-  "project_id_map": {
-    "user.email@example.com": "your-gcp-project-id"
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8888
   },
-  "min_credentials": 1,
+  "auth_keys": ["your-secret-key-1", "your-secret-key-2"],
+  "credentials_file": "credentials.json",
+  "project_id_map": {
+    "user1@gmail.com": "your-gcp-project-id-1",
+    "user2@gmail.com": "your-gcp-project-id-2"
+  },
   "log_level": "INFO",
   "request_timeouts": {
     "connect": 60,
@@ -14,6 +16,8 @@
   },
   "usage_logging": {
     "enabled": true,
-    "interval_sec": 30
-  }
+    "interval_sec": 300
+  },
+  "public_url": null,
+  "min_credentials": 1
 }

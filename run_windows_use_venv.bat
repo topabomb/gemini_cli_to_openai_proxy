@@ -9,6 +9,6 @@ call .\.venv\Scripts\activate.bat
 
 REM Run the Python script 
 echo Starting the Python application ...
-python -m gemini_cli_to_openai -c config.json
+python -m gemini_cli_openaiapi_proxy -c config.json
 echo Application has finished.
 pause
