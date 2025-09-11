@@ -9,8 +9,9 @@
 - **无缝 OpenAI API 兼容**: 零成本将现有 OpenAI 生态工具（如 ChatGPT Next Web, Ama, LobeChat 等）对接到 Gemini。
 - **全异步高性能**: 基于 FastAPI 和 httpx 构建，提供高吞吐量和低延迟的异步处理能力。
 - **网页端自动化认证**: 通过内置的 Web UI，轻松完成 Google OAuth2 认证流程，实现“一次登录，永久有效”。
-- **高可用凭据池**: 支持配置多个凭据，通过自动轮转和“冷静期”机制，有效规避单一账户的速率限制 (Rate Limit)，大幅提升服务稳定性。
-- **解锁 Gemini 高级功能**: 在兼容 API 中也能使用 Google Search、Thinking 等高级特性。
+- **高可用凭据池**: 支持配置多个凭据，通过自动轮转和智能健康检查机制，有效规避单一账户的速率限制 (Rate Limit)，大幅提升服务稳定性。
+- **智能自愈**: 对检查失败的凭据采用非侵入式的 `SUSPECTED` 状态，在不影响使用的情况下促进其“自愈”，增强系统鲁棒性。
+- **解锁 Gemini 高级功能**: 在兼容 API 中也能使用 Google Search 等高级特性。
 - **强大的管理与监控**: 内置 Web 管理界面和 API 端点，方便监控凭据状态和查询用量统计。
 - **现代架构**: 清晰的分层设计（核心、服务、API），易于理解、维护和二次开发。
 
@@ -62,14 +63,6 @@ pip install -r requirements.txt
 > **⚠️ 注意：配置文件不会自动加载**
 >
 > 程序启动时**不会**自动加载当前目录下的 `config.json`。您必须使用 `-c` 或 `--config` 参数显式指定配置文件路径，否则将使用内置的默认配置。
->
-> ```bash
-> # 错误方式 (不会加载 config.json)
-> python -m gemini_cli_openaiapi_proxy
->
-> # 正确方式
-> python -m gemini_cli_openaiapi_proxy -c config.json
-> ```
 
 #### 配置项说明
 
@@ -92,12 +85,13 @@ pip install -r requirements.txt
 ### 4. 启动服务器
 
 ```bash
-# 启动服务 (默认命令)
+# 启动服务
 python -m gemini_cli_openaiapi_proxy run -c config.json
 
 # (可选) 使用加密功能启动
 python -m gemini_cli_openaiapi_proxy run -c config.json -ek "your-secret-key-here"
 ```
+> **提示**: `run` 是默认命令，可以省略。例如：`python -m gemini_cli_openaiapi_proxy -c config.json`
 
 服务器启动后，您可以访问 `http://<your_host>:<your_port>` 来打开 Web 管理界面。
 
@@ -128,6 +122,41 @@ python -m gemini_cli_openaiapi_proxy run -c config.json --encryption-key "your-s
 ```
 
 当您首次使用密钥启动时，程序会自动读取现有的明文 `credentials.json`，用您的密钥对其进行加密，然后将加密后的内容写回文件。此后的所有读写操作都将是加密的。
+
+## 支持的模型 (Supported Models)
+
+本项目不仅代理了原生 Gemini API，还通过 OpenAI 兼容层提供了一系列增强的模型变体。
+
+### OpenAI 兼容模型
+
+当您通过 `/v1/chat/completions` 端点访问时，可以使用以下模型名称。这些名称会被代理服务解析，以调用对应的原生 Gemini 模型并启用特定功能。
+
+#### 基础模型
+
+根据当前代码 (`core/models.py`)，主要支持以下基础模型（用户请求时**不应**包含 `models/` 前缀）：
+
+- `gemini-2.5-pro-preview-05-06`
+- `gemini-2.5-pro`
+- `gemini-2.5-flash`
+
+*注意：您可以根据 Google 的更新，在 `core/models.py` 的 `BASE_MODELS` 列表中添加或修改支持的模型。*
+
+#### 模型变体 (后缀)
+
+对于上述每个基础模型，您都可以添加以下后缀来启用附加功能：
+
+- **`-search`**: 启用 Google Search 工具。此变体适用于所有基础模型。
+  - *示例*: `gemini-2.5-pro-search`
+
+- **`-nothinking`**: 禁用模型的“思考过程”（Thoughts）输出。此变体仅适用于 `gemini-2.5` 系列模型。
+  - *示例*: `gemini-2.5-pro-nothinking`
+
+- **`-maxthinking`**: 启用最大的“思考过程”预算，可能会提供更详细的推理步骤。此变体仅适用于 `gemini-2.5` 系列模型。
+  - *示例*: `gemini-2.5-flash-maxthinking`
+
+### 原生 Gemini 模型
+
+当您直接访问原生 Gemini API 端点时（如 `/v1beta/models/{model}:streamGenerateContent`），您可以使用 Google 官方支持的任何模型名称。
 
 ## API 使用指南 (Usage)
 
@@ -163,9 +192,13 @@ python -m gemini_cli_openaiapi_proxy run -c config.json --encryption-key "your-s
 新版代理采用基于 FastAPI 的现代化分层架构：
 
 ### 1. 服务层 (`services/`)
-- **`CredentialManager`**: 凭据管理器。负责从文件加载、持久化凭据。内置后台任务，使用 `refresh_token` 自动刷新即将过期的 `access_token`。当请求失败时，它能根据失败原因（如 429）将凭据置于临时“冷静期”，实现高可用轮转。
-- **`GoogleApiClient`**: Google API 客户端。基于 `httpx.AsyncClient` 实现全异步请求。它从 `CredentialManager` 获取可用凭据，并包含完整的请求重试逻辑。
-- **`UsageTracker`**: 用量追踪器。在内存中精确统计每个 `auth_key`、每个 `credential` 下每个模型的请求次数和 token 消耗。后台任务会定期将详细的多级统计报告打印到日志中。
+- **`CredentialManager`**: 凭据管理器。负责加载、持久化和轮转凭据。内置两个后台任务：
+    1.  **刷新循环**: 自动使用 `refresh_token` 刷新即将过期或失效的凭据。
+    2.  **健康检查循环**: 在系统空闲时，主动对凭据进行健康检查。检查失败的凭据会被标记为 `SUSPECTED`（可疑）状态，但仍可使用，若后续使用成功则会自动“自愈”。
+- **`GoogleApiClient`**: Google API 客户端。基于 `httpx.AsyncClient` 实现全异步请求，并包含完整的请求重试逻辑。
+- **`UsageTracker`**: 用量追踪器。在内存中精确统计每个 `auth_key` 和 `credential` 的用量。
+- **`HealthCheckService`**: 健康检查器。封装了多种原子检查策略（如检查模型列表、用户信息等），并随机选取一种执行，以避免行为模式被预测。
+- **`StateTracker`**: 系统状态追踪器。通过中间件实时追踪并发请求数，为健康检查提供“系统是否空闲”的判断依据。
 
 ### 2. API 层 (`api/`)
 - **路由 (`routes/`)**: 定义了所有对外暴露的 API 端点，包括 OpenAI 兼容 API、原生 Gemini 代理和管理 API。
@@ -174,6 +207,7 @@ python -m gemini_cli_openaiapi_proxy run -c config.json --encryption-key "your-s
 ### 3. 核心层 (`core/`)
 - **配置 (`config.py`)**: 集中管理应用的所有配置项和默认值。
 - **生命周期 (`lifespan.py`)**: 在应用启动时，负责初始化所有服务和后台任务；在应用关闭时，负责优雅地释放资源。
+- **类型定义 (`types.py`)**: 定义了跨模块共享的核心数据类和类型别名，如 `ManagedCredential`。
 
 ## 代码结构
 
@@ -193,10 +227,14 @@ gemini_cli_openaiapi_proxy/
 │   ├── config.py
 │   ├── lifespan.py
 │   ├── logging_config.py
-│   └── models.py
+│   ├── middleware.py
+│   ├── models.py
+│   └── types.py
 ├── services/            # 业务逻辑层
 │   ├── credential_manager.py
 │   ├── google_client.py
+│   ├── health_checker.py
+│   ├── state_tracker.py
 │   └── usage_tracker.py
 └── utils/               # 通用工具
     └── transformers.py
