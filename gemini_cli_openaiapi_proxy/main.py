@@ -10,11 +10,13 @@ import argparse
 import logging.config
 import sys
 import uvicorn
+import asyncio
 from cryptography.fernet import Fernet
 
 from .app import create_app
 from .core.config import load_settings
 from .core.logging_config import get_logging_config
+from .cli.local_auth_handler import execute_local_oauth_flow
 
 def run_server(args):
     """启动 FastAPI 服务器"""
@@ -44,6 +46,16 @@ def generate_key(args):
     print("Generated new encryption key. Please store it securely:")
     print(key.decode())
 
+def run_local_auth(args):
+    """启动本地 OAuth2 流程来添加新凭据"""
+    # 仅加载配置，不启动完整服务器
+    settings = load_settings(args.config)
+    try:
+        asyncio.run(execute_local_oauth_flow(settings))
+    except Exception as e:
+        print(f"\n[ERROR] An unexpected error occurred: {e}", file=sys.stderr)
+        sys.exit(1)
+
 def run():
     """
     主运行函数，用于解析命令行参数并分发到相应的处理函数。
@@ -70,6 +82,16 @@ def run():
     # 'generate-key' 子命令
     parser_gen_key = subparsers.add_parser("generate-key", help="Generate a new encryption key")
     parser_gen_key.set_defaults(func=generate_key)
+
+    # 'auth' 子命令
+    parser_auth = subparsers.add_parser("auth", help="Run local OAuth2 flow to add a new credential")
+    parser_auth.add_argument(
+        "-c", "--config",
+        type=str,
+        required=True, # 强制要求提供配置文件
+        help="Path to the configuration JSON file."
+    )
+    parser_auth.set_defaults(func=run_local_auth)
 
     # 如果没有提供子命令，则默认为 'run'
     # 这使得 `python -m ...` 和 `python -m ... run` 效果相同

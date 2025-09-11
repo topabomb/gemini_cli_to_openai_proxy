@@ -21,5 +21,11 @@
   "public_url": null,
   "min_credentials": 1,
   "admin_username": null,
-  "admin_password": null
+  "admin_password": null,
+
+  "auth_client": {
+    "proxy_url": "http://127.0.0.1:8888",
+    "admin_username": "admin",
+    "admin_password": "your_secure_password"
+  }
 }

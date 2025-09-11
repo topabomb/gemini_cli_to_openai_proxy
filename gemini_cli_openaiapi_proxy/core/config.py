@@ -59,6 +59,11 @@ class UsageLoggingSettings(TypedDict):
     enabled: bool
     interval_sec: int
 
+class AuthClientSettings(TypedDict):
+    proxy_url: str
+    admin_username: str
+    admin_password: str
+
 class SettingsDict(TypedDict):
     """
     Represents the fully resolved runtime settings, combining configuration 
@@ -76,6 +81,7 @@ class SettingsDict(TypedDict):
     credentials_encryption_key: Optional[str]
     admin_username: Optional[str]
     admin_password: Optional[str]
+    auth_client: Optional[AuthClientSettings]
 
 # ===== 默认配置 =====
 def _get_default_settings() -> SettingsDict:
@@ -96,6 +102,7 @@ def _get_default_settings() -> SettingsDict:
         "credentials_encryption_key": None,
         "admin_username": None,
         "admin_password": None,
+        "auth_client": None,
     }
     return data
 
@@ -148,6 +155,9 @@ def load_settings(config_path: Optional[str] = None, encryption_key: Optional[st
         
         if "admin_password" in user_config:
             settings["admin_password"] = user_config["admin_password"]
+        
+        if "auth_client" in user_config:
+            settings["auth_client"] = user_config["auth_client"]
 
     # 2. 合并来自命令行的参数
     settings["credentials_encryption_key"] = encryption_key

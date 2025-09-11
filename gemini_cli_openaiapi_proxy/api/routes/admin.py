@@ -6,11 +6,13 @@
 """
 
 import logging
+from typing import Any, Dict, cast
 from fastapi import APIRouter, Request, Depends
 
 logger = logging.getLogger(__name__)
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from google_auth_oauthlib.flow import Flow
+from google.auth.transport.requests import Request as GoogleAuthRequest
 import asyncio
 import oauthlib.oauth2.rfc6749.parameters
 
@@ -19,6 +21,7 @@ from ...services.credential_manager import CredentialManager
 from ...services.usage_tracker import UsageTracker
 from ..dependencies import get_credential_manager, get_usage_tracker
 from ..security import verify_admin_access
+from ...utils.credential_tools import SimpleCredential, build_credentials_from_simple
 
 router = APIRouter(
     tags=["Admin & OAuth"],
@@ -219,3 +222,44 @@ async def force_credential_health_check(
     result = await cred_manager.force_health_check(credential_id)
     status_code = 404 if "error" in result else 200
     return JSONResponse(content=result, status_code=status_code)
+
+
+from fastapi import HTTPException
+
+@router.post(
+    "/admin/credentials/add",
+    summary="Add or update a credential via API",
+    tags=["Admin & OAuth"],
+    dependencies=[Depends(verify_admin_access)],
+    responses={
+        200: {"description": "Credential added or updated successfully."},
+        400: {"description": "Invalid request or credential data."},
+        401: {"description": "Authentication failed."},
+    }
+)
+async def add_credential_api(
+    payload: Dict[str,Any],
+    cred_manager: CredentialManager = Depends(get_credential_manager)
+):
+    """
+    Receives a serialized credential and adds it to the pool.
+    This endpoint is protected by admin Basic Auth.
+    """
+    # Cast the TypedDict to a regular Dict for the function call
+    creds = build_credentials_from_simple(cast(SimpleCredential,payload))
+
+    ok, reason = await cred_manager.add_or_update_credential(creds)
+
+    if ok:
+        email = "N/A"
+        all_creds = cred_manager.get_all_credential_details()
+        if all_creds:
+            # 假设新添加的总是最后一个
+            email = all_creds[-1].get("email", "N/A")
+        
+        return JSONResponse(
+            status_code=200,
+            content={"status": "success", "message": reason, "email": email}
+        )
+    else:
+        raise HTTPException(status_code=400, detail=reason)

@@ -16,7 +16,7 @@ import asyncio
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple,cast
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -27,54 +27,9 @@ from ..core.config import (
 )
 from ..core.types import CredentialStatus, ManagedCredential
 from ..utils.sanitizer import sanitize_email, sanitize_project_id
+from ..utils.credential_tools import SimpleCredential, build_credentials_from_simple, credentials_to_simple
 from .state_tracker import SystemStateTracker
 from .health_checker import HealthCheckService
-
-# ===== 辅助函数 =====
-
-def _ms_to_datetime(ms: int) -> datetime:
-    """毫秒时间戳转 UTC datetime。"""
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
-
-def _datetime_to_ms(dt: datetime) -> int:
-    """UTC datetime 转毫秒时间戳（容忍 naive，按 UTC 处理）。"""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return int(dt.timestamp() * 1000)
-
-def _build_credentials_from_simple(simple: Dict[str, Any]) -> Credentials:
-    """从 simple dict 构造 Google Credentials，优先使用持久化的 scopes。"""
-    # 为了兼容旧格式，如果 scopes 不在持久化文件里，则回退到全局常量
-    scopes_to_use = simple.get("scopes")
-    if scopes_to_use:
-        logger.debug(f"[CredManager] Building credential using scopes from file: {scopes_to_use}")
-    else:
-        scopes_to_use = SCOPES
-        logger.debug(f"[CredManager] Building credential. Scopes not in file, falling back to constant: {scopes_to_use}")
-
-    info = {
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "token": simple.get("access_token"),
-        "refresh_token": simple.get("refresh_token"),
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "scopes": scopes_to_use,
-    }
-    creds = Credentials.from_authorized_user_info(info, scopes_to_use)
-    if expiry_ms := simple.get("expiry_date"):
-        creds.expiry = _ms_to_datetime(int(expiry_ms))
-    return creds
-
-def _credentials_to_simple(creds: Credentials) -> Dict[str, Any]:
-    """将 Credentials 转为包含 scopes 的 simple dict。"""
-    expiry_ms = _datetime_to_ms(creds.expiry) if creds.expiry else None
-    return {
-        "access_token": creds.token,
-        "refresh_token": creds.refresh_token,
-        "token_type": "Bearer",
-        "expiry_date": expiry_ms,
-        "scopes": creds.scopes,
-    }
 
 def _derive_key(user_key: str) -> bytes:
     """从用户提供的字符串派生一个确定性的、URL安全的 Fernet 密钥。"""
@@ -111,7 +66,7 @@ class CredentialManager:
             derived_key = _derive_key(key)
             self.fernet = Fernet(derived_key)
 
-    def _read_file(self) -> List[Dict[str, Any]]:
+    def _read_file(self) -> List[SimpleCredential]:
         path = self.settings["credentials_file"]
         try:
             with open(path, "rb") as f:
@@ -142,7 +97,7 @@ class CredentialManager:
         # 尝试解析JSON
         try:
             data = json.loads(decrypted_data)
-            return [data] if isinstance(data, dict) else data
+            return [cast(SimpleCredential, data)] if isinstance(data, dict) else data
         except json.JSONDecodeError:
             # 如果没有提供密钥但JSON解析失败，很可能是因为文件是加密的
             if not self.fernet:
@@ -198,7 +153,7 @@ class CredentialManager:
             self.credentials = []
             for idx, item in enumerate(simple_items):
                 try:
-                    creds = _build_credentials_from_simple(item)
+                    creds = build_credentials_from_simple(item)
                     
                     is_expired = False
                     if creds.expiry:
@@ -251,16 +206,25 @@ class CredentialManager:
         """
         logger.debug(f"[CredManager] Received new credential with scopes from OAuth flow: {new_creds.scopes}")
         if not new_creds.refresh_token:
+            logger.warning("[CredManager] Add/Update failed: credential is missing refresh_token.")
             return False, "missing_refresh_token"
 
         new_email = await self._get_email_from_credentials(new_creds)
         if not new_email:
+            logger.warning("[CredManager] Add/Update failed: could not get email from new credential.")
             return False, "failed_to_get_email"
+        
+        sanitized_email = sanitize_email(new_email)
+        logger.info(f"[CredManager] Processing credential for user: {sanitized_email}")
 
         project_id_map = self.settings.get("project_id_map", {})
         new_pid = project_id_map.get(new_email) or await self._discover_project_id(new_creds)
         if not new_pid:
+            logger.warning(f"[CredManager] Add/Update for {sanitized_email} failed: could not discover project_id.")
             return False, "failed_to_discover_project_id"
+        
+        sanitized_pid = sanitize_project_id(new_pid)
+        logger.info(f"[CredManager] Associated project_id for {sanitized_email} is {sanitized_pid}.")
 
         async with self.lock:
             for existing_cred in self.credentials:
@@ -356,7 +320,8 @@ class CredentialManager:
         await loop.run_in_executor(None, creds.refresh, GoogleAuthRequest())
 
     def _persist_current_state(self):
-        items = [_credentials_to_simple(c.credentials) for c in self.credentials]
+        # Cast to List[Dict[str, Any]] to satisfy the type checker for _write_file
+        items: List[Dict[str, Any]] = [dict(credentials_to_simple(c.credentials)) for c in self.credentials]
         self._write_file(items)
         logger.debug("[CredManager] Persisted current credentials state to file.")
 
