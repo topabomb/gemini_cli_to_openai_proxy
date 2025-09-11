@@ -43,8 +43,8 @@ async def lifespan(app: FastAPI):
     google_api_client = GoogleApiClient(settings, cred_manager, http_client, usage_tracker)
     
     # 4. 现在 google_api_client 存在了，获取它的检查函数并设置给 health_checker
+    #    我们只保留最可靠的检查器
     checkers = [
-        google_api_client.check_model_list_access,
         google_api_client.check_userinfo_access,
         google_api_client.check_simple_model_call,
     ]

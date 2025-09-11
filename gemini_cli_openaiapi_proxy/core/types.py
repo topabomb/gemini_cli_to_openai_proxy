@@ -8,7 +8,7 @@
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Callable, Awaitable
+from typing import Optional, Callable, Awaitable, Tuple
 
 from google.oauth2.credentials import Credentials
 from ..utils.sanitizer import sanitize_email
@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 # ===== 类型别名 =====
 
-# 代表一个原子健康检查函数
-AtomicHealthCheck = Callable[['ManagedCredential'], Awaitable[bool]]
+# 代表一个原子健康检查函数，返回一个包含健康状态和描述信息的元组
+AtomicHealthCheck = Callable[['ManagedCredential'], Awaitable[Tuple[bool, str]]]
 
 
 # ===== 数据类 =====

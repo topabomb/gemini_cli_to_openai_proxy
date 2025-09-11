@@ -74,6 +74,17 @@ async def get_admin_ui(
     else:
         usage_html += "<p>No usage data recorded yet.</p>"
 
+    # 2.5. 生成手动检查链接
+    manual_check_links = "<h4>Manual Health Checks</h4><ul>"
+    if not all_creds:
+        manual_check_links += "<li>No credentials available to check.</li>"
+    else:
+        for cred in all_creds:
+            cred_id = cred.get('id')
+            cred_email = cred.get('email', 'N/A')
+            manual_check_links += f'<li><a href="/admin/credentials/{cred_id}/check" target="_blank">Check: {cred_id} ({cred_email})</a></li>'
+    manual_check_links += "</ul>"
+
     # 3. 组装完整 HTML
     content = f"""
     <!DOCTYPE html>
@@ -97,10 +108,11 @@ async def get_admin_ui(
         <div>
             <h3>Endpoints</h3>
             <ul>
-                <li><a href="/admin/credentials" >View Credentials Status</a></li>
-                <li><a href="/admin/usage" >View Usage Stats</a></li>
+                <li><a href="/admin/credentials" >View Credentials Status (JSON)</a></li>
+                <li><a href="/admin/usage" >View Usage Stats (JSON)</a></li>
                 <li><a href="/health" >Health Check</a></li>
             </ul>
+            {manual_check_links}
         </div>
     </body>
     </html>
@@ -197,3 +209,13 @@ async def get_usage_status(usage_tracker: UsageTracker = Depends(get_usage_track
     """获取聚合后的用量统计，不暴露任何敏感分组信息。"""
     summary = await usage_tracker.get_aggregated_usage_summary()
     return JSONResponse(content=summary)
+
+@router.get("/admin/credentials/{credential_id}/check")
+async def force_credential_health_check(
+    credential_id: str,
+    cred_manager: CredentialManager = Depends(get_credential_manager)
+):
+    """强制对单个凭据执行健康检查并返回详细结果。"""
+    result = await cred_manager.force_health_check(credential_id)
+    status_code = 404 if "error" in result else 200
+    return JSONResponse(content=result, status_code=status_code)

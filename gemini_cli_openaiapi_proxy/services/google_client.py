@@ -11,7 +11,7 @@ import asyncio
 import time
 import uuid
 import random
-from typing import Dict, Any, AsyncGenerator
+from typing import Dict, Any, AsyncGenerator, Tuple
 
 import httpx
 from fastapi import Response
@@ -33,90 +33,63 @@ HEALTH_CHECK_PROMPTS = [
     {"contents": [{"role": "user", "parts": [{"text": "Hi, are you there?"}]}]},
     {"contents": [{"role": "user", "parts": [{"text": "Hello, can you hear me?"}]}]},
     {"contents": [{"role": "user", "parts": [{"text": "What is the capital of France?"}]}]},
-    {"contents": [{"role": "user", "parts": [{"text": "Please say 'test'."}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": "Please say '测试'."}]}]},
 ]
 
 class GoogleApiClient:
-    async def check_model_list_access(self, credential: ManagedCredential) -> bool:
-        """
-        原子健康检查：尝试获取模型列表。
-        这是一个轻量级的检查，用于验证凭据的基本 API 访问权限。
-        """
-        try:
-            # 根据官方文档，v1beta/models 是一个有效的端点
-            resp = await self.http_client.get(
-                f"{CODE_ASSIST_ENDPOINT}/v1beta/models?pageSize=10",
-                headers={"Authorization": f"Bearer {credential.credentials.token}"},
-                timeout=5
-            )
-            resp.raise_for_status()
-            logger.debug(f"Health check 'model_list' successful for {credential.log_safe_id}.")
-            return True
-        except Exception as e:
-            logger.warning(
-                f"Health check 'model_list' failed for credential "
-                f"'{credential.log_safe_id}'. Error: {e}"
-            )
-            return False
 
-    async def check_userinfo_access(self, credential: ManagedCredential) -> bool:
+    async def check_userinfo_access(self, credential: ManagedCredential) -> Tuple[bool, str]:
         """
         原子健康检查：尝试获取用户信息。
-        此检查验证 OAuth token 是否对标准 Google 用户信息端点有效。
         """
         try:
-            # 这是标准的 OpenID Connect 用户信息端点
             resp = await self.http_client.get(
                 "https://openidconnect.googleapis.com/v1/userinfo",
                 headers={"Authorization": f"Bearer {credential.credentials.token}"},
-                timeout=5
+                timeout=10
             )
             resp.raise_for_status()
-            logger.debug(f"Health check 'userinfo' successful for {credential.log_safe_id}.")
-            return True
+            message = "Successfully fetched user info."
+            logger.debug(f"Health check '{self.check_userinfo_access.__name__}' successful for {credential.log_safe_id}: {message}")
+            return True, message
         except Exception as e:
-            logger.warning(
-                f"Health check 'userinfo' failed for credential "
-                f"'{credential.log_safe_id}'. Error: {e}"
-            )
-            return False
+            message = f"Health check '{self.check_userinfo_access.__name__}' failed. Error: {e}"
+            logger.warning(f"For credential '{credential.log_safe_id}': {message}")
+            return False, message
 
-    async def check_simple_model_call(self, credential: ManagedCredential) -> bool:
+    async def check_simple_model_call(self, credential: ManagedCredential) -> Tuple[bool, str]:
         """
-        原子健康检查：尝试一次极简的模型调用。
-        这是最真实的检查，因为它模拟了实际的 generateContent 调用。
+        原子健康检查：尝试一次极简的模型调用，精确模拟真实请求。
         """
         if not credential.project_id:
-            logger.warning(f"Health check 'simple_model_call' skipped for {credential.log_safe_id} due to missing project_id.")
-            return False
+            return False, "Health check skipped due to missing project_id."
             
-        # 从列表中随机选择一个 payload
-        payload = random.choice(HEALTH_CHECK_PROMPTS)
-        model_name = "gemini-2.5-flash-lite"
+        gemini_request = random.choice(HEALTH_CHECK_PROMPTS)
+        model_name = "gemini-2.5-flash-lite" # 使用稳定基础模型
         
-        # 记录将要发送的内容
-        sent_text = payload["contents"][0]["parts"][0]["text"]
-        logger.debug(f"Performing 'simple_model_call' health check for {credential.log_safe_id} with prompt: '{sent_text}'")
+        sent_text = gemini_request["contents"][0]["parts"][0]["text"]
+        logger.debug(f"Performing '{self.check_simple_model_call.__name__}' for {credential.log_safe_id} with prompt: '{sent_text}'")
 
         try:
-            # 端点和 payload 结构遵循 v1beta generateContent API 规范
-            url = f"{CODE_ASSIST_ENDPOINT}/v1beta/models/{model_name}:generateContent"
-            full_payload = {"request": payload, "project": credential.project_id, "model": model_name}
+            # 最终修正：直接调用内部的 _prepare_request_components 来确保 URL 和 payload 100% 一致
+            post_data, target_url, headers, timeout_config = self._prepare_request_components(
+                managed_cred=credential,
+                model=model_name,
+                gemini_request=gemini_request,
+                is_streaming=False
+            )
             
             resp = await self.http_client.post(
-                url, json=full_payload,
-                headers={"Authorization": f"Bearer {credential.credentials.token}"},
-                timeout=20
+                target_url, content=post_data, headers=headers, timeout=timeout_config
             )
             resp.raise_for_status()
-            logger.info(f"Health check 'simple_model_call' successful for {credential.log_safe_id}.")
-            return True
+            message = "Successfully generated content."
+            logger.info(f"Health check '{self.check_simple_model_call.__name__}' successful for {credential.log_safe_id}: {message}")
+            return True, message
         except Exception as e:
-            logger.warning(
-                f"Health check 'simple_model_call' failed for credential "
-                f"'{credential.log_safe_id}'. Error: {e}"
-            )
-            return False
+            message = f"Health check '{self.check_simple_model_call.__name__}' failed. Error: {e}"
+            logger.warning(f"For credential '{credential.log_safe_id}': {message}")
+            return False, message
     """
     一个全异步的 Google API 客户端。
     """

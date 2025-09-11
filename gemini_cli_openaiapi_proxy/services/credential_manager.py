@@ -422,7 +422,8 @@ class CredentialManager:
                 # 3. 在锁外执行网络IO
                 if target_cred:
                     logger.info(f"Performing health check on idle credential: {target_cred.log_safe_id}")
-                    is_healthy = await self.health_checker.check(target_cred)
+                    check_result = await self.health_checker.check(target_cred)
+                    is_healthy = check_result.get("is_healthy", False)
                     
                     # 4. 在锁内更新状态
                     async with self.lock:
@@ -465,6 +466,42 @@ class CredentialManager:
         if self.health_check_task and not self.health_check_task.done():
             self.health_check_task.cancel()
             logger.info("[CredManager] Background health check task stopped.")
+
+    async def force_health_check(self, credential_id: str) -> Dict[str, Any]:
+        """
+        对指定的凭据强制执行一次健康检查，并返回详细结果。
+        """
+        target_cred = None
+        async with self.lock:
+            for c in self.credentials:
+                if c.id == credential_id:
+                    target_cred = c
+                    break
+        
+        if not target_cred:
+            return {"error": "Credential not found", "credential_id": credential_id}
+
+        previous_status = target_cred.status
+        
+        logger.info(f"Force running health check on credential: {target_cred.log_safe_id}")
+        check_result = await self.health_checker.check(target_cred)
+        is_healthy = check_result.get("is_healthy", False)
+        
+        async with self.lock:
+            if not is_healthy:
+                target_cred.mark_suspected()
+            else:
+                target_cred.mark_healthy("Manual check passed")
+
+            new_status = target_cred.status
+            
+            return {
+                "credential_id": credential_id,
+                "check_time": datetime.now(timezone.utc).isoformat(),
+                "previous_status": previous_status,
+                "new_status": new_status,
+                "check_details": check_result
+            }
 
     def get_all_credential_details(self) -> List[Dict[str, Any]]:
         details = []

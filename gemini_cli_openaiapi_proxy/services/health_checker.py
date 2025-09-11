@@ -1,5 +1,5 @@
 import random
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from ..core.types import ManagedCredential, AtomicHealthCheck
 
 class HealthCheckService:
@@ -34,7 +34,7 @@ class HealthCheckService:
             raise ValueError("HealthCheckService requires at least one checker function.")
         self.checkers = checkers
 
-    async def check(self, credential: ManagedCredential) -> bool:
+    async def check(self, credential: ManagedCredential) -> Dict[str, Any]:
         """
         对给定的凭据执行一次随机选择的健康检查。
 
@@ -42,14 +42,20 @@ class HealthCheckService:
             credential: 需要被检查的 ManagedCredential 对象。
 
         Returns:
-            一个布尔值，表示检查是否通过。
+            一个包含详细检查结果的字典。
         """
         if not self.checkers:
-            # 如果没有配置检查器，直接返回 True，相当于跳过检查
-            return True
+            return {
+                "checker_name": "NoCheckers",
+                "is_healthy": True,
+                "reason": "No checkers configured."
+            }
             
-        # 从列表中随机选择一个检查函数
         selected_checker = random.choice(self.checkers)
+        is_healthy, reason = await selected_checker(credential)
         
-        # 执行选定的检查并返回结果
-        return await selected_checker(credential)
+        return {
+            "checker_name": selected_checker.__name__,
+            "is_healthy": is_healthy,
+            "reason": reason
+        }
