@@ -7,12 +7,16 @@
 
 import logging
 from contextlib import asynccontextmanager
+from typing import cast, List
 import httpx
 from fastapi import FastAPI
 
 from ..services.credential_manager import CredentialManager
 from ..services.google_client import GoogleApiClient
 from ..services.usage_tracker import UsageTracker
+from ..services.state_tracker import SystemStateTracker
+from ..services.health_checker import HealthCheckService
+from ..core.types import AtomicHealthCheck
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -27,15 +31,31 @@ async def lifespan(app: FastAPI):
     http_client = httpx.AsyncClient()
     app.state.http_client = http_client
     
-    # 2. 初始化核心服务
-    cred_manager = CredentialManager(settings, http_client)
-    app.state.credential_manager = cred_manager
+    # 2. 初始化核心服务 (使用延迟注入解决循环依赖)
+    system_tracker = SystemStateTracker()
+    health_checker = HealthCheckService() # 1. 创建一个空的 health_checker
+
+    # 2. 创建 cred_manager，此时 health_checker 是空的
+    cred_manager = CredentialManager(settings, http_client, system_tracker, health_checker)
     
+    # 3. 创建依赖 cred_manager 的服务
     usage_tracker = UsageTracker(cred_manager)
-    app.state.usage_tracker = usage_tracker
-    
-    # 注意：google_api_client 依赖其他服务，所以最后初始化
     google_api_client = GoogleApiClient(settings, cred_manager, http_client, usage_tracker)
+    
+    # 4. 现在 google_api_client 存在了，获取它的检查函数并设置给 health_checker
+    checkers = [
+        google_api_client.check_model_list_access,
+        google_api_client.check_userinfo_access,
+        google_api_client.check_simple_model_call,
+    ]
+    health_checker.set_checkers(cast(List[AtomicHealthCheck], checkers))
+
+    # 5. 将所有最终的服务实例存入 app.state
+    app.state.http_client = http_client
+    app.state.system_tracker = system_tracker
+    app.state.health_checker = health_checker
+    app.state.credential_manager = cred_manager
+    app.state.usage_tracker = usage_tracker
     app.state.google_api_client = google_api_client
     
     # 3. 加载持久化凭据并检查
@@ -69,7 +89,7 @@ async def lifespan(app: FastAPI):
             )
 
     # 4. 启动后台任务
-    cred_manager.start_refresh_task()
+    cred_manager.start_background_tasks()
     if settings["usage_logging"]["enabled"]:
         usage_tracker.start_logging_task(settings["usage_logging"]["interval_sec"])
         
@@ -81,7 +101,7 @@ async def lifespan(app: FastAPI):
     logging.info("Application shutdown...")
     
     # 1. 停止后台任务
-    app.state.credential_manager.stop_refresh_task()
+    app.state.credential_manager.stop_background_tasks()
     if app.state.settings["usage_logging"]["enabled"]:
         app.state.usage_tracker.stop_logging_task()
         

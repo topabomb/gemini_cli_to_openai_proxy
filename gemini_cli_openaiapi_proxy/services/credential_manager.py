@@ -15,15 +15,20 @@ logger = logging.getLogger(__name__)
 import asyncio
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
-from ..core.config import SettingsDict, CLIENT_ID, CLIENT_SECRET, SCOPES, CODE_ASSIST_ENDPOINT
+from ..core.config import (
+    SettingsDict, CLIENT_ID, CLIENT_SECRET, SCOPES, CODE_ASSIST_ENDPOINT,
+    HEALTH_CHECK_IDLE_THRESHOLD_SEC, HEALTH_CHECK_POSTPONE_INTERVAL_SEC
+)
+from ..core.types import CredentialStatus, ManagedCredential
 from ..utils.sanitizer import sanitize_email, sanitize_project_id
+from .state_tracker import SystemStateTracker
+from .health_checker import HealthCheckService
 
 # ===== 辅助函数 =====
 
@@ -69,93 +74,27 @@ def _derive_key(user_key: str) -> bytes:
     # 使用 URL-safe Base64 编码，使其符合 Fernet 密钥格式
     return base64.urlsafe_b64encode(digest)
 
-# ===== 数据类定义 =====
-
-class CredentialStatus:
-    ACTIVE = "active"
-    EXPIRED = "expired"
-    REFRESHING = "refreshing"
-    RATE_LIMITED = "rate_limited"  # 429
-    PERMISSION_DENIED = "permission_denied"  # 403
-    ERROR = "error"  # Unrecoverable
-
-@dataclass
-class ManagedCredential:
-    """封装一个 Google OAuth2 凭据及其相关的元数据和状态。"""
-    id: str
-    credentials: Credentials
-    project_id: Optional[str] = None
-    email: Optional[str] = None
-    status: str = CredentialStatus.ACTIVE
-    
-    # 时间戳
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    last_used_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    last_refreshed_at: Optional[datetime] = None
-    rate_limited_until: Optional[datetime] = None
-    failed_at: Optional[datetime] = None
-    
-    # 统计与状态
-    usage_count: int = 0
-    failure_reason: Optional[str] = None
-
-    def is_available(self) -> bool:
-        """检查凭据当前是否可用，并在此过程中更新瞬时状态（如过期）。"""
-        # 如果一个凭据的冷静期结束，将其状态恢复为 ACTIVE
-        if self.status == CredentialStatus.RATE_LIMITED:
-            if self.rate_limited_until and datetime.now(timezone.utc) > self.rate_limited_until:
-                self.status = CredentialStatus.ACTIVE
-                self.rate_limited_until = None
-                self.failure_reason = None
-                logger.info(f"Credential for {sanitize_email(self.email)} has recovered from rate limit.")
-        
-        # 只有 ACTIVE 状态的凭据才有可能被使用
-        if self.status != CredentialStatus.ACTIVE:
-            return False
-        
-        # 检查 ACTIVE 状态的凭据是否已过期
-        is_expired = False
-        if self.credentials.expiry:
-            expiry_utc = self.credentials.expiry if self.credentials.expiry.tzinfo is not None else self.credentials.expiry.replace(tzinfo=timezone.utc)
-            is_expired = expiry_utc < datetime.now(timezone.utc)
-
-        if is_expired:
-            self.status = CredentialStatus.EXPIRED
-            return False
-        return True
-
-    def mark_used(self):
-        self.last_used_at = datetime.now(timezone.utc)
-        self.usage_count += 1
-
-    def mark_rate_limited(self, minutes: int = 30):
-        self.status = CredentialStatus.RATE_LIMITED
-        self.rate_limited_until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
-        self.failure_reason = "429 Too Many Requests"
-        self.failed_at = datetime.now(timezone.utc)
-
-    def mark_permission_denied(self):
-        self.status = CredentialStatus.PERMISSION_DENIED
-        self.failure_reason = "403 Forbidden"
-        self.failed_at = datetime.now(timezone.utc)
-
-    def mark_as_permanent_error(self, reason: str):
-        self.status = CredentialStatus.ERROR
-        self.failure_reason = reason
-        self.failed_at = datetime.now(timezone.utc)
-
 # ===== 主服务类 =====
 
 class CredentialManager:
     """统一的凭据池管理服务。"""
 
-    def __init__(self, settings: SettingsDict, http_client: httpx.AsyncClient):
+    def __init__(
+        self,
+        settings: SettingsDict,
+        http_client: httpx.AsyncClient,
+        system_tracker: SystemStateTracker,
+        health_checker: HealthCheckService,
+    ):
         self.settings = settings
         self.http_client = http_client
+        self.system_tracker = system_tracker
+        self.health_checker = health_checker
         self.credentials: List[ManagedCredential] = []
         self.current_index = 0
         self.lock = asyncio.Lock()
         self.refresh_task: Optional[asyncio.Task] = None
+        self.health_check_task: Optional[asyncio.Task] = None
         
         self.fernet: Optional[Fernet] = None
         if key := settings.get("credentials_encryption_key"):
@@ -375,7 +314,7 @@ class CredentialManager:
             return True
         except Exception as e:
             logger.error(f"[CredManager] Refresh failed for {sanitize_email(c.email)}: {e}")
-            c.mark_as_permanent_error(str(e))
+            c.mark_as_permanent_error(f"error_during_refresh,{str(e)}")
             return False
 
     async def _refresh_credential_object(self, creds: Credentials):
@@ -426,16 +365,80 @@ class CredentialManager:
                 logger.error(f"[CredManager] Refresh loop error: {e}")
                 await asyncio.sleep(60)
 
-    def start_refresh_task(self):
-        if self.refresh_task and not self.refresh_task.done():
-            return
-        self.refresh_task = asyncio.create_task(self._refresh_loop())
-        logger.info("[CredManager] Background credential refresh task started.")
+    async def _health_check_loop(self):
+        """
+        后台健康检查循环，主动发现“亚健康”凭据。
+        """
+        while True:
+            try:
+                # 1. 检查系统是否繁忙
+                if self.system_tracker.active_requests_count > 0:
+                    postpone_duration = HEALTH_CHECK_POSTPONE_INTERVAL_SEC + random.uniform(-5, 5)
+                    logger.debug(f"System is busy. Postponing health check for {postpone_duration:.2f} seconds.")
+                    await asyncio.sleep(postpone_duration)
+                    continue
 
-    def stop_refresh_task(self):
+                async with self.lock:
+                    # 2. 筛选出需要检查的凭据
+                    #   - 状态为 ACTIVE
+                    #   - 有效的 refresh_token
+                    #   - 距离上次使用时间超过阈值
+                    now = datetime.now(timezone.utc)
+                    idle_threshold = timedelta(seconds=HEALTH_CHECK_IDLE_THRESHOLD_SEC)
+                    
+                    candidates = [
+                        c for c in self.credentials
+                        if c.status == CredentialStatus.ACTIVE and 
+                           c.credentials.refresh_token and
+                           (now - c.last_used_at) > idle_threshold
+                    ]
+
+                    if not candidates:
+                        # 没有需要检查的凭据，短暂休眠后继续
+                        await asyncio.sleep(60)
+                        continue
+
+                    # 3. 从候选者中选择最久未使用的那个
+                    target_cred = min(candidates, key=lambda c: c.last_used_at)
+                    
+                    logger.info(f"Performing health check on idle credential: {target_cred.log_safe_id}")
+                    
+                    # 4. 执行健康检查
+                    is_healthy = await self.health_checker.check(target_cred)
+                    
+                    if not is_healthy:
+                        target_cred.mark_suspected()
+                    else:
+                        # 如果检查通过，可以认为它“被使用”了一次，以更新其 last_used_at 时间戳
+                        target_cred.mark_used()
+
+                # 5. 随机化休眠以避免惊群效应
+                await asyncio.sleep(HEALTH_CHECK_POSTPONE_INTERVAL_SEC * random.uniform(0.8, 1.2))
+
+            except asyncio.CancelledError:
+                logger.info("[CredManager] Health check loop cancelled.")
+                break
+            except Exception as e:
+                logger.error(f"[CredManager] Health check loop error: {e}", exc_info=True)
+                await asyncio.sleep(60) # 发生未知错误时，等待较长时间
+
+    def start_background_tasks(self):
+        if not (self.refresh_task and not self.refresh_task.done()):
+            self.refresh_task = asyncio.create_task(self._refresh_loop())
+            logger.info("[CredManager] Background credential refresh task started.")
+        
+        if not (self.health_check_task and not self.health_check_task.done()):
+            self.health_check_task = asyncio.create_task(self._health_check_loop())
+            logger.info("[CredManager] Background health check task started.")
+
+    def stop_background_tasks(self):
         if self.refresh_task and not self.refresh_task.done():
             self.refresh_task.cancel()
             logger.info("[CredManager] Background credential refresh task stopped.")
+        
+        if self.health_check_task and not self.health_check_task.done():
+            self.health_check_task.cancel()
+            logger.info("[CredManager] Background health check task stopped.")
 
     def get_all_credential_details(self) -> List[Dict[str, Any]]:
         details = []

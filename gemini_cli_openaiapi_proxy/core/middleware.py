@@ -12,6 +12,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
+from fastapi import Request
+from ..services.state_tracker import SystemStateTracker
 
 # 使用 ContextVar 来在整个请求处理链路中安全地传递请求 ID
 # 明确类型为 Optional[str]，并提供 None 作为默认值
@@ -37,4 +39,26 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         
+        return response
+
+class StateTrackingMiddleware(BaseHTTPMiddleware):
+    """
+    追踪系统中活动 API 请求数量的中间件。
+
+    它通过在请求开始时递增计数器、在请求结束时递减计数器，
+    来为 `SystemStateTracker` 服务提供实时数据。
+    """
+    def __init__(self, app: ASGIApp, tracker: SystemStateTracker):
+        super().__init__(app)
+        self.tracker = tracker
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        """
+        在请求处理前后更新活动请求计数。
+        """
+        self.tracker.increment()
+        try:
+            response = await call_next(request)
+        finally:
+            self.tracker.decrement()
         return response

@@ -25,6 +25,10 @@ SCOPES: List[str] = [
 # ===== Google API 端点与默认安全设置 =====
 CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
 
+# ===== 健康检查相关配置 =====
+HEALTH_CHECK_IDLE_THRESHOLD_SEC = 600  # 10 minutes
+HEALTH_CHECK_POSTPONE_INTERVAL_SEC = 60   # 1 minute
+
 DEFAULT_SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -87,6 +91,7 @@ def _get_default_settings() -> SettingsDict:
         "usage_logging": {"enabled": True, "interval_sec": 30},
         "public_url": None,
         "min_credentials": 1,
+        "credentials_encryption_key": None,
         "admin_username": None,
         "admin_password": None,
     }

@@ -7,7 +7,7 @@
 from fastapi import FastAPI
 from .core.config import SettingsDict
 from .core.lifespan import lifespan
-from .core.middleware import RequestIdMiddleware
+from .core.middleware import RequestIdMiddleware, StateTrackingMiddleware
 from .api.routes import admin, gemini
 from .api.exception_handlers import generic_exception_handler
 
@@ -24,6 +24,12 @@ def create_app(settings: SettingsDict) -> FastAPI:
 
     # 将配置存储在应用状态中，以便在各处访问
     app.state.settings = settings
+
+    # 添加状态追踪中间件
+    # 注意：它必须在 lifespan 上下文之后被添加，以便能访问 app.state.system_tracker
+    @app.on_event("startup")
+    async def add_state_tracking_middleware():
+        app.add_middleware(StateTrackingMiddleware, tracker=app.state.system_tracker)
 
     # 添加请求 ID 中间件
     app.add_middleware(RequestIdMiddleware)
