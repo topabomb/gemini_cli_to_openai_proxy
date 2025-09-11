@@ -43,28 +43,37 @@ def _datetime_to_ms(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
 def _build_credentials_from_simple(simple: Dict[str, Any]) -> Credentials:
-    """由四字段构造 Google Credentials。"""
+    """从 simple dict 构造 Google Credentials，优先使用持久化的 scopes。"""
+    # 为了兼容旧格式，如果 scopes 不在持久化文件里，则回退到全局常量
+    scopes_to_use = simple.get("scopes")
+    if scopes_to_use:
+        logger.debug(f"[CredManager] Building credential using scopes from file: {scopes_to_use}")
+    else:
+        scopes_to_use = SCOPES
+        logger.debug(f"[CredManager] Building credential. Scopes not in file, falling back to constant: {scopes_to_use}")
+
     info = {
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
         "token": simple.get("access_token"),
         "refresh_token": simple.get("refresh_token"),
         "token_uri": "https://oauth2.googleapis.com/token",
-        "scopes": SCOPES,
+        "scopes": scopes_to_use,
     }
-    creds = Credentials.from_authorized_user_info(info, SCOPES)
+    creds = Credentials.from_authorized_user_info(info, scopes_to_use)
     if expiry_ms := simple.get("expiry_date"):
         creds.expiry = _ms_to_datetime(int(expiry_ms))
     return creds
 
 def _credentials_to_simple(creds: Credentials) -> Dict[str, Any]:
-    """将 Credentials 转为四字段。"""
+    """将 Credentials 转为包含 scopes 的 simple dict。"""
     expiry_ms = _datetime_to_ms(creds.expiry) if creds.expiry else None
     return {
         "access_token": creds.token,
         "refresh_token": creds.refresh_token,
         "token_type": "Bearer",
         "expiry_date": expiry_ms,
+        "scopes": creds.scopes,
     }
 
 def _derive_key(user_key: str) -> bytes:
@@ -236,9 +245,10 @@ class CredentialManager:
 
     async def add_or_update_credential(self, new_creds: Credentials) -> Tuple[bool, str]:
         """
-        根据 email 和 project_id 添加或更新一个凭据。
+        根据 email 和 project_id 添加或更新一个凭据,project_id 为空的会强制替换。
         如果已存在，则更新；如果不存在，则添加。
         """
+        logger.debug(f"[CredManager] Received new credential with scopes from OAuth flow: {new_creds.scopes}")
         if not new_creds.refresh_token:
             return False, "missing_refresh_token"
 
@@ -252,7 +262,7 @@ class CredentialManager:
 
         async with self.lock:
             for existing_cred in self.credentials:
-                if existing_cred.email == new_email and existing_cred.project_id == new_pid:
+                if existing_cred.email == new_email and (existing_cred.project_id is None or existing_cred.project_id == new_pid):
                     logger.info(f"[CredManager] Updating existing credential for {sanitize_email(new_email)} (id: {existing_cred.id}).")
                     existing_cred.credentials = new_creds
                     existing_cred.status = CredentialStatus.ACTIVE
@@ -320,6 +330,7 @@ class CredentialManager:
             async with self.lock:
                 c.status = CredentialStatus.REFRESHING
             
+            logger.debug(f"[CredManager] Attempting to refresh {c.log_safe_id} with scopes: {c.credentials.scopes}")
             await self._refresh_credential_object(c.credentials)
             
             # 成功后，获取锁以更新状态并持久化

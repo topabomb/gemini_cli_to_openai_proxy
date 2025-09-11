@@ -18,8 +18,10 @@ _ENCODED_CLIENT_SECRET = "R09DU1BYLTR1SGdNUG0tMW83U2stZ2VWNkN1NWNsWEZzeGw="
 CLIENT_ID = base64.b64decode(_ENCODED_CLIENT_ID).decode("utf-8")
 CLIENT_SECRET = base64.b64decode(_ENCODED_CLIENT_SECRET).decode("utf-8")
 SCOPES: List[str] = [
+    "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
+    "openid"
 ]
 
 # ===== Google API 端点与默认安全设置 =====
