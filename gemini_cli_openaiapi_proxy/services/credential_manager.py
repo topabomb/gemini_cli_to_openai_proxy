@@ -351,43 +351,57 @@ class CredentialManager:
             try:
                 logger.debug("[CredManager] Identifying credentials for periodic refresh...")
                 
-                # 1. 在锁内快速识别需要刷新的凭据
                 candidates_to_refresh = []
                 now = datetime.now(timezone.utc)
+                
                 async with self.lock:
                     for c in self.credentials:
                         if not c.credentials.refresh_token:
                             continue
 
-                        # 检查是否需要刷新
-                        is_permission_denied = c.status == CredentialStatus.PERMISSION_DENIED
+                        # 1. 最高优先级安全锁：1小时内活动过的凭据，绝对不碰
+                        if (now - c.last_used_at) < timedelta(hours=1):
+                            continue
+
+                        # --- 从这里开始，处理的是已空闲超过1小时的凭据 ---
+
+                        # 2. 恢复性刷新：恢复冷却结束的速率限制凭据
                         is_rate_limited_and_recovered = (
-                            c.status == CredentialStatus.RATE_LIMITED and 
+                            c.status == CredentialStatus.RATE_LIMITED and
                             c.rate_limited_until and now > c.rate_limited_until
                         )
-                        is_near_expiry = (
-                            c.status == CredentialStatus.ACTIVE and c.credentials.expiry and
-                            (c.credentials.expiry.replace(tzinfo=timezone.utc) < now + timedelta(minutes=10))
-                        )
-
-                        if is_permission_denied or is_rate_limited_and_recovered or is_near_expiry:
+                        if is_rate_limited_and_recovered:
                             candidates_to_refresh.append(c)
-                
-                # 2. 在锁外执行实际的刷新操作
-                if candidates_to_refresh:
-                    logger.info(f"[CredManager] Found {len(candidates_to_refresh)} candidates for proactive refresh.")
-                    for c in candidates_to_refresh:
-                        await self._refresh_credential(c)
+                            continue
 
-                base_interval = 300
-                # 在基础间隔的 50% 到 100% 之间随机选择延迟时间
-                delay = base_interval * random.uniform(0.5, 1.0)
-                await asyncio.sleep(delay)
+                        # 3. 预防性/修复性刷新：处理其他可刷新状态的凭据
+                        is_in_expiry_check_scope = c.status in [
+                            CredentialStatus.ACTIVE,
+                            CredentialStatus.SUSPECTED,
+                            CredentialStatus.EXPIRED
+                        ]
+                        if is_in_expiry_check_scope and c.credentials.expiry:
+                            random_expiry_window = timedelta(minutes=random.randint(1, 10))
+                            # 如果凭据即将在随机窗口内过期（这也包含了已经过期的情况），则刷新
+                            if c.credentials.expiry.replace(tzinfo=timezone.utc) < now + random_expiry_window:
+                                candidates_to_refresh.append(c)
+                                continue
+                
+                if candidates_to_refresh:
+                    # 使用 dict.fromkeys 来去重，以防一个凭据满足多个条件
+                    unique_candidates = list(dict.fromkeys(candidates_to_refresh))
+                    if unique_candidates:
+                        logger.info(f"[CredManager] Found {len(unique_candidates)} idle candidates for proactive refresh.")
+                        for c in unique_candidates:
+                            await self._refresh_credential(c)
+
+                # 4. 固定循环间隔
+                await asyncio.sleep(60)
             except asyncio.CancelledError:
                 logger.info("[CredManager] Refresh loop cancelled.")
                 break
             except Exception as e:
-                logger.error(f"[CredManager] Refresh loop error: {e}")
+                logger.error(f"[CredManager] Refresh loop error: {e}", exc_info=True)
                 await asyncio.sleep(60)
 
     async def _health_check_loop(self):
