@@ -24,16 +24,43 @@ from .usage_tracker import UsageTracker
 from ..core.models import get_base_model_name
 from ..utils.sanitizer import sanitize_email
 from ..utils.transformers import gemini_to_openai_response, gemini_to_openai_stream_chunk
-from datetime import datetime, timezone
+from datetime import datetime, timezone,timedelta
 
 logger = logging.getLogger(__name__)
-
+def random_date(start_year=2000, end_year=2025):
+    """生成随机日期字符串 YYYY-MM-DD"""
+    start = datetime(start_year, 1, 1)
+    end = datetime(end_year, 12, 31)
+    delta = end - start
+    random_days = random.randint(0, delta.days)
+    return (start + timedelta(days=random_days)).strftime("%Y-%m-%d")
+greetings_multilang = [
+    "早上好",       # 中文 - Good morning
+    "谢谢",         # 中文 - Thank you
+    "再见",         # 中文 - Goodbye
+    "Hello",        # 英文 - Hello
+    "Goodbye",      # 英文 - Goodbye
+    "Bonjour",      # 法语 - Hello / Good morning
+    "Gracias",      # 西班牙语 - Thank you
+    "Ciao",         # 意大利语 - Hello / Goodbye
+    "Guten Tag",    # 德语 - Good day
+    "こんにちは"     # 日语 - Hello / Good afternoon
+]
 # 用于健康检查的简单对话列表
 HEALTH_CHECK_PROMPTS = [
-    {"contents": [{"role": "user", "parts": [{"text": "Hi, are you there?"}]}]},
-    {"contents": [{"role": "user", "parts": [{"text": "Hello, can you hear me?"}]}]},
-    {"contents": [{"role": "user", "parts": [{"text": "What is the capital of France?"}]}]},
-    {"contents": [{"role": "user", "parts": [{"text": "Please say '测试'."}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": f"查询纽约{random_date()}的气温"}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": f"计算{random.randint(1000, 999999)}的平方根，提供结果"}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": f"列出{random.randint(2,5)}个随机的英文单词"}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": f"把'{random.choice(['Python','Rust','TypeScript','Vue'])}'倒序输出"}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": f"生成一个1到{random.randint(50,200)}之间的随机数"}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": f"火星在大气温度{random.randint(-150, 30)}摄氏度时的地面温度大约是多少"}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": f"把{random_date()}加上{random.randint(1, 365)}天后输出"}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": f"给我一个{random.randint(4,6)}个字的中文成语"}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": f"输出一个{random.randint(1,4)}句的唐诗"}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": f"列出{random.randint(2,5)}个质数"}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": f"翻译'{random.choice(greetings_multilang)}'成英文"}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": f"提供一个{random.randint(1,4)}位的四则运算题目"}]}]},
+    {"contents": [{"role": "user", "parts": [{"text": f"提供一个{random.randint(10,40)}单词的英文例句"}]}]},
 ]
 
 class GoogleApiClient:
@@ -83,7 +110,18 @@ class GoogleApiClient:
                 target_url, content=post_data, headers=headers, timeout=timeout_config
             )
             resp.raise_for_status()
-            message = "Successfully generated content."
+            
+            # 解析响应以获取生成的内容
+            response_data = resp.json()
+            try:
+                # 尝试从标准路径提取文本
+                generated_text = response_data['response']['candidates'][0]['content']['parts'][0]['text']
+                message = f"Successfully generated content: ask(${sent_text}),answer '{generated_text.strip()}'"
+            except (KeyError, IndexError, TypeError):
+                print("Failed to parse response data:", json.dumps(response_data))
+                # 如果结构不符合预期，则使用通用成功消息
+                message = "Successfully generated content (but failed to parse response)."
+
             logger.info(f"Health check '{self.check_simple_model_call.__name__}' successful for {credential.log_safe_id}: {message}")
             return True, message
         except Exception as e:
