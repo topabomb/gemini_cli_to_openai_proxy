@@ -1,14 +1,19 @@
 """
-This module provides typed utilities for handling credential serialization,
-shared between the server and the client.
+This module provides typed utilities for handling credential serialization
+and project ID discovery, shared between the server and the client.
 """
 import logging
-from typing import Any, Dict, List, Optional, TypedDict
+from typing_extensions import Any, Dict, List, Optional, TypedDict
 from google.oauth2.credentials import Credentials
-from ..core.config import CLIENT_ID, CLIENT_SECRET, SCOPES
+import httpx
+from pydantic import BaseModel
+
+from ..core.config import CLIENT_ID, CLIENT_SECRET, SCOPES, CODE_ASSIST_ENDPOINT
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+# ===== Data Models =====
 
 class SimpleCredential(TypedDict):
     """A typed dictionary representing the essential, serializable fields of a credential."""
@@ -17,6 +22,13 @@ class SimpleCredential(TypedDict):
     token_type: str
     expiry_date: Optional[int]  # Milliseconds
     scopes: List[str]
+
+class AddCredentialRequest(BaseModel):
+    """Pydantic model for the request to add a new credential."""
+    credential: SimpleCredential
+    project_id: Optional[str] = None
+
+# ===== Serialization/Deserialization =====
 
 def _datetime_to_ms(dt: datetime) -> int:
     """Converts a UTC datetime object to milliseconds since the epoch."""
@@ -40,7 +52,7 @@ def credentials_to_simple(creds: Credentials) -> SimpleCredential:
     }
     return simple
 
-def build_credentials_from_simple(simple: SimpleCredential) -> Credentials:
+def build_credentials_from_simple(simple: Dict[str, Any]) -> Credentials:
     """Builds a Credentials object from a simple dictionary."""
     scopes_to_use = simple.get("scopes")
     if not scopes_to_use:
@@ -59,3 +71,52 @@ def build_credentials_from_simple(simple: SimpleCredential) -> Credentials:
     if expiry_ms := simple.get("expiry_date"):
         creds.expiry = _ms_to_datetime(int(expiry_ms))
     return creds
+
+# ===== Project ID Discovery =====
+
+async def get_email_from_credentials(creds: Credentials, http_client: httpx.AsyncClient) -> Optional[str]:
+    """Fetches the user's email address using the provided credentials."""
+    headers = {"Authorization": f"Bearer {creds.token}"}
+    try:
+        resp = await http_client.get("https://openidconnect.googleapis.com/v1/userinfo", headers=headers, timeout=10)
+        if resp.is_success:
+            return resp.json().get("email")
+    except Exception as e:
+        logger.warning(f"Failed to get email via userinfo endpoint: {e}")
+    return None
+
+async def discover_project_id(creds: Credentials, http_client: httpx.AsyncClient) -> Optional[str]:
+    """Discovers the GCP project ID associated with the credentials."""
+    headers = {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
+    payload = {"metadata": {}}
+    try:
+        resp = await http_client.post(f"{CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist", json=payload, headers=headers, timeout=20)
+        resp.raise_for_status()
+        return resp.json().get("cloudaicompanionProject")
+    except Exception as e:
+        logger.warning(f"Failed to discover project_id via API: {e}")
+        return None
+
+async def determine_project_id(
+    creds: Credentials,
+    project_id_map: Dict[str, str],
+    http_client: httpx.AsyncClient
+) -> Optional[str]:
+    """
+    Determines the project ID using a priority-based approach:
+    1. Check the provided project_id_map.
+    2. Fall back to discovering via API call.
+    """
+    email = await get_email_from_credentials(creds, http_client)
+    if not email:
+        logger.warning("Could not determine project ID because email could not be fetched.")
+        return None
+
+    # 1. Check map first
+    if project_id := project_id_map.get(email):
+        logger.info(f"Found project ID '{project_id}' in config map for email '{email}'.")
+        return project_id
+
+    # 2. Fall back to API discovery
+    logger.info(f"Project ID for '{email}' not in config map, attempting API discovery.")
+    return await discover_project_id(creds, http_client)

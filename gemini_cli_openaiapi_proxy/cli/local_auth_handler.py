@@ -10,7 +10,7 @@ import httpx
 from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from ..core.config import SettingsDict, CLIENT_ID, CLIENT_SECRET, SCOPES
-from ..utils.credential_tools import credentials_to_simple
+from ..utils.credential_tools import credentials_to_simple, determine_project_id
 
 class _OAuthCallbackHandler(BaseHTTPRequestHandler):
     """A simple HTTP handler to capture the OAuth2 callback."""
@@ -40,6 +40,11 @@ async def execute_local_oauth_flow(settings: SettingsDict):
     """
     Orchestrates the entire local OAuth2 flow from start to finish.
     """
+    # Create a temporary http client for project_id discovery
+    async with httpx.AsyncClient() as client:
+        await _execute_flow_with_client(settings, client)
+
+async def _execute_flow_with_client(settings: SettingsDict, client: httpx.AsyncClient):
     # 1. Validate configuration
     auth_client_config = settings.get("auth_client")
     if not auth_client_config or not all(k in auth_client_config for k in ["proxy_url", "admin_username", "admin_password"]):
@@ -120,27 +125,42 @@ async def execute_local_oauth_flow(settings: SettingsDict):
 
     print("Access token refreshed, submitting to proxy server...")
 
-    # 7. Submit the serialized credential to the proxy server
+    # 7. Determine the project ID
+    print("Attempting to determine project ID...")
+    project_id_map = settings.get("project_id_map", {})
+    project_id = await determine_project_id(creds, project_id_map, client)
+
+    if not project_id:
+        print("\n[ERROR] Could not determine Project ID.", file=sys.stderr)
+        print("Please ensure your account has an active GCP project, or add it to the 'project_id_map' in your config file.", file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"Project ID '{project_id}' determined successfully.")
+    print("Submitting credential and project ID to proxy server...")
+
+    # 8. Submit the serialized credential and project ID to the proxy server
     proxy_url = auth_client_config["proxy_url"].rstrip('/')
     admin_user = auth_client_config["admin_username"]
     admin_pass = auth_client_config["admin_password"]
     
-    payload = credentials_to_simple(creds)
+    payload = {
+        "credential": credentials_to_simple(creds),
+        "project_id": project_id,
+    }
 
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{proxy_url}/admin/credentials/add",
-                json=payload,
-                auth=(admin_user, admin_pass),
-                timeout=30
-            )
-            response.raise_for_status()
-            
-            result = response.json()
-            email = result.get("email", "N/A")
-            message = result.get("message", "No message returned.")
-            print(f"\n[SUCCESS] Credential for '{email}' processed successfully: {message}")
+        response = await client.post(
+            f"{proxy_url}/admin/credentials/add",
+            json=payload,
+            auth=(admin_user, admin_pass),
+            timeout=30
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        email = result.get("email", "N/A")
+        message = result.get("message", "No message returned.")
+        print(f"\n[SUCCESS] Credential for '{email}' processed successfully: {message}")
 
     except httpx.ConnectError:
         print(f"\n[ERROR] Connection to proxy server at '{proxy_url}' failed.", file=sys.stderr)

@@ -27,7 +27,7 @@ from ..core.config import (
 )
 from ..core.types import CredentialStatus, ManagedCredential
 from ..utils.sanitizer import sanitize_email, sanitize_project_id
-from ..utils.credential_tools import SimpleCredential, build_credentials_from_simple, credentials_to_simple
+from ..utils.credential_tools import SimpleCredential, build_credentials_from_simple, credentials_to_simple, get_email_from_credentials, discover_project_id
 from .state_tracker import SystemStateTracker
 from .health_checker import HealthCheckService
 
@@ -110,7 +110,7 @@ class CredentialManager:
 
     def _write_file(self, items: List[Dict[str, Any]]):
         path = self.settings["credentials_file"]
-        out: Any = items[0] if len(items) == 1 else items
+        out: Any = items if len(items) == 1 else items
         
         try:
             json_data = json.dumps(out, ensure_ascii=False, indent=2).encode('utf-8')
@@ -124,27 +124,6 @@ class CredentialManager:
         except Exception as e:
             logger.error(f"[CredManager] Failed to write credentials file {path}: {e}")
 
-    async def _get_email_from_credentials(self, creds: Credentials) -> Optional[str]:
-        headers = {"Authorization": f"Bearer {creds.token}"}
-        try:
-            resp = await self.http_client.get("https://openidconnect.googleapis.com/v1/userinfo", headers=headers, timeout=10)
-            if resp.is_success:
-                return resp.json().get("email")
-        except Exception as e:
-            logger.warning(f"[CredManager] Failed to get email via userinfo endpoint: {e}")
-        return None
-
-    async def _discover_project_id(self, creds: Credentials) -> Optional[str]:
-        headers = {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
-        payload = {"metadata": {}}
-        try:
-            resp = await self.http_client.post(f"{CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist", json=payload, headers=headers, timeout=20)
-            resp.raise_for_status()
-            return resp.json().get("cloudaicompanionProject")
-        except Exception as e:
-            logger.warning(f"[CredManager] Failed to discover project_id via API: {e}")
-            return None
-
     async def load_credentials(self):
         simple_items = self._read_file()
         logger.info(f"[CredManager] Loading {len(simple_items)} credentials from file.")
@@ -153,7 +132,8 @@ class CredentialManager:
             self.credentials = []
             for idx, item in enumerate(simple_items):
                 try:
-                    creds = build_credentials_from_simple(item)
+                    # Cast the TypedDict to a regular Dict for the function call
+                    creds = build_credentials_from_simple(dict(item))
                     
                     is_expired = False
                     if creds.expiry:
@@ -175,7 +155,7 @@ class CredentialManager:
             self._persist_current_state()
 
     async def _update_managed_credential_metadata(self, mc: ManagedCredential):
-        email = await self._get_email_from_credentials(mc.credentials)
+        email = await get_email_from_credentials(mc.credentials, self.http_client)
         if not email:
             mc.status = CredentialStatus.ERROR
             mc.failure_reason = "Failed to get email"
@@ -187,7 +167,7 @@ class CredentialManager:
         project_id_map = self.settings.get("project_id_map", {})
         pid = project_id_map.get(email)
         if not pid:
-            pid = await self._discover_project_id(mc.credentials)
+            pid = await discover_project_id(mc.credentials, self.http_client)
         
         if not pid:
             mc.status = CredentialStatus.ERROR
@@ -199,17 +179,22 @@ class CredentialManager:
         mc.project_id = pid
         logger.debug(f"[CredManager] Updated metadata for {mc.id}: email={sanitize_email(email)}, project_id={sanitize_project_id(pid)}")
 
-    async def add_or_update_credential(self, new_creds: Credentials) -> Tuple[bool, str]:
+    async def add_or_update_credential(
+        self, new_creds: Credentials, project_id_override: Optional[str] = None
+    ) -> Tuple[bool, str]:
         """
-        根据 email 和 project_id 添加或更新一个凭据,project_id 为空的会强制替换。
-        如果已存在，则更新；如果不存在，则添加。
+        Adds or updates a credential.
+        The project ID is determined with the following priority:
+        1. `project_id_override` argument.
+        2. `project_id_map` in settings.
+        3. API discovery.
         """
-        logger.debug(f"[CredManager] Received new credential with scopes from OAuth flow: {new_creds.scopes}")
+        logger.debug(f"[CredManager] Received new credential with scopes: {new_creds.scopes}")
         if not new_creds.refresh_token:
             logger.warning("[CredManager] Add/Update failed: credential is missing refresh_token.")
             return False, "missing_refresh_token"
 
-        new_email = await self._get_email_from_credentials(new_creds)
+        new_email = await get_email_from_credentials(new_creds, self.http_client)
         if not new_email:
             logger.warning("[CredManager] Add/Update failed: could not get email from new credential.")
             return False, "failed_to_get_email"
@@ -217,33 +202,37 @@ class CredentialManager:
         sanitized_email = sanitize_email(new_email)
         logger.info(f"[CredManager] Processing credential for user: {sanitized_email}")
 
-        project_id_map = self.settings.get("project_id_map", {})
-        new_pid = project_id_map.get(new_email) or await self._discover_project_id(new_creds)
-        if not new_pid:
-            logger.warning(f"[CredManager] Add/Update for {sanitized_email} failed: could not discover project_id.")
-            return False, "failed_to_discover_project_id"
+        # Determine the project ID
+        final_project_id = project_id_override
+        if not final_project_id:
+            project_id_map = self.settings.get("project_id_map", {})
+            final_project_id = project_id_map.get(new_email) or await discover_project_id(new_creds, self.http_client)
         
-        sanitized_pid = sanitize_project_id(new_pid)
-        logger.info(f"[CredManager] Associated project_id for {sanitized_email} is {sanitized_pid}.")
+        if not final_project_id:
+            logger.warning(f"[CredManager] Add/Update for {sanitized_email} failed: could not determine project_id.")
+            return False, "failed_to_determine_project_id"
+        
+        sanitized_pid = sanitize_project_id(final_project_id)
+        logger.info(f"[CredManager] Using project_id '{sanitized_pid}' for {sanitized_email}.")
 
-        async with self.lock:
-            for existing_cred in self.credentials:
-                if existing_cred.email == new_email and (existing_cred.project_id is None or existing_cred.project_id == new_pid):
-                    logger.info(f"[CredManager] Updating existing credential for {sanitize_email(new_email)} (id: {existing_cred.id}).")
-                    existing_cred.credentials = new_creds
-                    existing_cred.status = CredentialStatus.ACTIVE
-                    existing_cred.failure_reason = None
-                    existing_cred.failed_at = None
-                    existing_cred.last_refreshed_at = datetime.now(timezone.utc)
-                    self._persist_current_state()
-                    return True, "credential_updated"
+        for existing_cred in self.credentials:
+            if existing_cred.email == new_email and (existing_cred.project_id is None or existing_cred.project_id == final_project_id):
+                logger.info(f"[CredManager] Updating existing credential for {sanitized_email} (id: {existing_cred.id}).")
+                existing_cred.credentials = new_creds
+                existing_cred.project_id = final_project_id
+                existing_cred.status = CredentialStatus.ACTIVE
+                existing_cred.failure_reason = None
+                existing_cred.failed_at = None
+                existing_cred.last_refreshed_at = datetime.now(timezone.utc)
+                self._persist_current_state()
+                return True, "credential_updated"
 
-            logger.info(f"[CredManager] Adding new credential for {sanitize_email(new_email)}.")
-            new_id = f"cred-{len(self.credentials)}"
-            mc = ManagedCredential(id=new_id, credentials=new_creds, email=new_email, project_id=new_pid)
-            self.credentials.append(mc)
-            self._persist_current_state()
-            return True, "credential_added"
+        logger.info(f"[CredManager] Adding new credential for {sanitized_email}.")
+        new_id = f"cred-{len(self.credentials)}"
+        mc = ManagedCredential(id=new_id, credentials=new_creds, email=new_email, project_id=final_project_id)
+        self.credentials.append(mc)
+        self._persist_current_state()
+        return True, "credential_added"
 
     async def get_available(self) -> Optional[ManagedCredential]:
         # 允许多次尝试，以覆盖一次按需刷新的场景
