@@ -229,7 +229,8 @@ class CredentialManager:
             return
 
         mc.email = email
-        pid = self.settings["project_id_map"].get(email)
+        project_id_map = self.settings.get("project_id_map", {})
+        pid = project_id_map.get(email)
         if not pid:
             pid = await self._discover_project_id(mc.credentials)
         
@@ -255,8 +256,9 @@ class CredentialManager:
         new_email = await self._get_email_from_credentials(new_creds)
         if not new_email:
             return False, "failed_to_get_email"
-            
-        new_pid = self.settings["project_id_map"].get(new_email) or await self._discover_project_id(new_creds)
+
+        project_id_map = self.settings.get("project_id_map", {})
+        new_pid = project_id_map.get(new_email) or await self._discover_project_id(new_creds)
         if not new_pid:
             return False, "failed_to_discover_project_id"
 
