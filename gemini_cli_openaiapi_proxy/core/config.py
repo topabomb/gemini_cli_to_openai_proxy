@@ -26,7 +26,7 @@ SCOPES: List[str] = [
 CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
 
 # ===== 健康检查相关配置 =====
-HEALTH_CHECK_IDLE_THRESHOLD_SEC = 600  # 10 minutes
+HEALTH_CHECK_IDLE_THRESHOLD_SEC = 3600  # 60 minutes
 HEALTH_CHECK_POSTPONE_INTERVAL_SEC = 60   # 1 minute
 
 DEFAULT_SAFETY_SETTINGS = [

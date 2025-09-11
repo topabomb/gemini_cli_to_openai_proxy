@@ -412,16 +412,20 @@ class CredentialManager:
             try:
                 # 1. 检查系统是否繁忙
                 if self.system_tracker.active_requests_count > 0:
-                    postpone_duration = HEALTH_CHECK_POSTPONE_INTERVAL_SEC + random.uniform(-5, 5)
+                    postpone_duration = HEALTH_CHECK_POSTPONE_INTERVAL_SEC * random.uniform(1.0, 1.5)
                     logger.debug(f"System is busy. Postponing health check for {postpone_duration:.2f} seconds.")
                     await asyncio.sleep(postpone_duration)
                     continue
 
-                # 2. 在锁内快速识别出检查目标
+                # 2. 动态计算带抖动的闲置阈值
+                base_idle_sec = HEALTH_CHECK_IDLE_THRESHOLD_SEC
+                random_idle_sec = base_idle_sec * random.uniform(0.5, 1.0)
+                idle_threshold = timedelta(seconds=random_idle_sec)
+
+                # 3. 在锁内快速识别出检查目标
                 target_cred = None
                 async with self.lock:
                     now = datetime.now(timezone.utc)
-                    idle_threshold = timedelta(seconds=HEALTH_CHECK_IDLE_THRESHOLD_SEC)
                     
                     candidates = [
                         c for c in self.credentials
@@ -431,15 +435,16 @@ class CredentialManager:
                     ]
 
                     if candidates:
+                        # 总是选择最久未使用的凭据进行检查
                         target_cred = min(candidates, key=lambda c: c.last_used_at)
 
-                # 3. 在锁外执行网络IO
+                # 4. 在锁外执行网络IO
                 if target_cred:
-                    logger.info(f"Performing health check on idle credential: {target_cred.log_safe_id}")
+                    logger.info(f"Performing health check on idle credential: {target_cred.log_safe_id} (idle for > {idle_threshold})")
                     check_result = await self.health_checker.check(target_cred)
                     is_healthy = check_result.get("is_healthy", False)
                     
-                    # 4. 在锁内更新状态
+                    # 在锁内更新状态
                     async with self.lock:
                         # 再次确认凭据状态没有在检查期间被改变
                         if target_cred.status == CredentialStatus.ACTIVE:
@@ -450,11 +455,11 @@ class CredentialManager:
                                 target_cred.mark_used()
                 else:
                     # 没有需要检查的凭据，短暂休眠后继续
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(HEALTH_CHECK_POSTPONE_INTERVAL_SEC)
                     continue
 
                 # 5. 随机化休眠以避免惊群效应
-                await asyncio.sleep(HEALTH_CHECK_POSTPONE_INTERVAL_SEC * random.uniform(0.8, 1.2))
+                await asyncio.sleep(HEALTH_CHECK_POSTPONE_INTERVAL_SEC * random.uniform(1.0, 1.5))
 
             except asyncio.CancelledError:
                 logger.info("[CredManager] Health check loop cancelled.")
