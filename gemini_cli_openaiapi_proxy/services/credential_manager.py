@@ -338,6 +338,7 @@ class CredentialManager:
             # 成功后，获取锁以更新状态并持久化
             async with self.lock:
                 c.mark_healthy(f"Successfully refreshed for {c.log_safe_id}")
+                c.last_refreshed_at = datetime.now(timezone.utc)
                 self._persist_current_state()
             
             logger.info(f"[CredManager] Refreshed credential for {c.log_safe_id} successfully.")
