@@ -370,8 +370,8 @@ class CredentialManager:
                         if not c.credentials.refresh_token:
                             continue
 
-                        # 1. 最高优先级安全锁：1小时内活动过的凭据，绝对不碰
-                        if (now - c.last_used_at) < timedelta(hours=1):
+                        # 1. 最高优先级安全锁：30分钟内活动过的凭据，绝对不碰
+                        if c.last_used_at and (now - c.last_used_at) < timedelta(minutes=30):
                             continue
 
                         # --- 从这里开始，处理的是已空闲超过1小时的凭据 ---
@@ -443,12 +443,13 @@ class CredentialManager:
                         c for c in self.credentials
                         if c.status == CredentialStatus.ACTIVE and 
                            c.credentials.refresh_token and
-                           (now - c.last_used_at) > idle_threshold
+                           (not c.last_used_at or (now - c.last_used_at) > idle_threshold)
                     ]
 
                     if candidates:
                         # 总是选择最久未使用的凭据进行检查
-                        target_cred = min(candidates, key=lambda c: c.last_used_at)
+                        # 为了处理 None，我们将 None 视为一个非常早的时间
+                        target_cred = min(candidates, key=lambda c: c.last_used_at if c.last_used_at else datetime.min.replace(tzinfo=timezone.utc))
 
                 # 4. 在锁外执行网络IO
                 if target_cred:
