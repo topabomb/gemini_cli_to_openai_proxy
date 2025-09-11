@@ -399,8 +399,9 @@ class CredentialManager:
                                 continue
                 
                 if candidates_to_refresh:
-                    # 使用 dict.fromkeys 来去重，以防一个凭据满足多个条件
-                    unique_candidates = list(dict.fromkeys(candidates_to_refresh))
+                    # 使用 id 进行去重，并重建 ManagedCredential 对象列表
+                    unique_candidates_map = {c.id: c for c in candidates_to_refresh}
+                    unique_candidates = list(unique_candidates_map.values())
                     if unique_candidates:
                         logger.info(f"[CredManager] Found {len(unique_candidates)} idle candidates for proactive refresh.")
                         for c in unique_candidates:
