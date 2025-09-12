@@ -291,8 +291,11 @@ class GoogleApiClient:
                 
                 usage_metadata: Dict[str, Any] = {}
                 async with self.http_client.stream("POST", target_url, content=post_data, headers=headers, timeout=timeout_config) as resp:
-                    # 如果状态码不是 200，则直接进入异常处理逻辑，以便重试
+                    # 如果状态码不是 200，则在流关闭前读取错误内容，然后抛出异常
                     if resp.status_code != 200:
+                        error_body = await resp.aread()
+                        # 将错误内容附加到 response 对象上，以便 except 块可以访问
+                        setattr(resp, "error_body", error_body)
                         resp.raise_for_status()
 
                     # --- 核心流式转发逻辑 ---
@@ -337,7 +340,8 @@ class GoogleApiClient:
                     logger.warning(log_msg)
                     # 请求级错误，不惩罚凭据，不重试，直接透传错误
                     await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
-                    error_text = await e.response.aread()
+                    # 从我们之前附加的属性中安全地获取错误内容
+                    error_text = getattr(e.response, 'error_body', b'')
                     yield self._create_error_sse_chunk(f"API request failed with status {e.response.status_code}:{error_text.decode(errors='ignore')}", e.response.status_code)
                     return
 
