@@ -90,6 +90,14 @@ class ManagedCredential:
         if self.status == CredentialStatus.SUSPECTED:
             self.mark_healthy("Self-healed after successful use")
 
+    def mark_expired(self):
+        """主动将凭据标记为过期状态，通常在收到 401 后调用。"""
+        if self.status != CredentialStatus.EXPIRED:
+            self.status = CredentialStatus.EXPIRED
+            self.failure_reason = "401 Unauthorized (token expired)"
+            self.failed_at = datetime.now(timezone.utc)
+            logger.warning(f"Credential {self.log_safe_id} marked as EXPIRED due to 401 error.")
+
     def mark_healthy(self, reason: str):
         """将凭据标记为健康状态。"""
         if self.status != CredentialStatus.ACTIVE:

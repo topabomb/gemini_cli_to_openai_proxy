@@ -1,8 +1,9 @@
-# Gemini to OpenAI API Proxy (v2)
+# Gemini cli to OpenAI API Proxy 
 
-将 Google Gemini 封装为 OpenAI 兼容 API 的异步代理服务。
+将 Gemini cli 的调用 封装为 OpenAI 兼容 API 的多凭据异步代理服务。
 
-> **版本说明**: 本项目 (`gemini_cli_openaiapi_proxy`) 是对原有 `gemini_cli_to_openai` 的一次重构，采用了现代化的 FastAPI 框架和全异步架构，在保持核心功能的基础上，大幅提升了性能、可维护性和可扩展性。
+> **版本说明**: 本项目 (`gemini_cli_openaiapi_proxy`) 是对原有 `gemini_cli_to_openai` 的一次重构，采用了现代化的 FastAPI 框架和全异步架构。
+
 
 ## 核心特性 (Core Features)
 
@@ -10,7 +11,7 @@
 - **全异步高性能**: 基于 FastAPI 和 httpx 构建，提供高吞吐量和低延迟的异步处理能力。
 - **多样的认证方式**: 支持通过 Web 界面或纯命令行完成 Google OAuth2 认证，方便在不同环境下添加凭据。
 - **高可用凭据池**: 支持配置多个凭据，通过自动轮转和智能健康检查机制，有效规避单一账户的速率限制 (Rate Limit)，大幅提升服务稳定性。
-- **智能自愈**: 对检查失败的凭据采用非侵入式的 `SUSPECTED` 状态，在不影响使用的情况下促进其“自愈”，增强系统鲁棒性。
+- **智能自愈**: 对检查失败的凭据采用非侵入式的 `SUSPECTED` 状态。系统拥有两种“自愈”路径：1) 在实际 API 调用中成功使用；2) **通过后台的周期性健康检查自动恢复**，增强了凭据池的鲁棒性。
 - **解锁 Gemini 高级功能**: 在兼容 API 中也能使用 Google Search 等高级特性。
 - **强大的管理与监控**: 内置 Web 管理界面和 API 端点，方便监控凭据状态和查询用量统计。
 - **现代架构**: 清晰的分层设计（核心、服务、API），易于理解、维护和二次开发。
@@ -29,7 +30,6 @@ pip install -r requirements.txt
 ```
 
 #### 3. 创建配置文件
-在项目根目录创建一个 `config.json` 文件。这是配置代理服务器所有行为的核心。
 
 **完整配置范例:**
 ```json
@@ -78,11 +78,11 @@ python -m gemini_cli_openaiapi_proxy run -c config.json
 
 ### 第三步：添加凭据
 
-您可以通过以下两种方式之一来完成 Google OAuth2 认证并添加凭据。
+您可以通过以下两种方式之一来添加凭据。
 
 #### 方式 A: 通过 Web 界面 (推荐)
 
-这是最简单的方式，尤其适合在本地桌面环境使用。
+适合在本地桌面环境使用。
 
 1.  打开浏览器并访问您的服务地址，例如 `http://127.0.0.1:8888`。
 2.  如果配置了管理员密码，请先登录。
@@ -149,7 +149,7 @@ python -m gemini_cli_openaiapi_proxy run -c config.json
 | `server.port` | `integer` | 服务器监听的端口。 | `8889` |
 | `auth_keys` | `list[string]` | 用于 API 认证的密钥列表。 | `["123456"]` |
 | `credentials_file` | `string` | 存储 OAuth 凭据的 JSON 文件路径。 | `"credentials1.json"` |
-| `project_id_map` | `dict` | 用户邮箱到 GCP 项目 ID 的映射。强烈建议配置此项以提高稳定性。 | `{}` |
+| `project_id_map` | `dict` | 用户邮箱到 GCP 项目 ID 的映射。主要用于**首次添加凭据时**提供一个高优先级的 `project_id`。一旦凭据被添加，其 `project_id` 将被**自动持久化**到 `credentials_file` 中，此映射不再生效。 | `{}` |
 | `min_credentials` | `integer` | 启动时所需的最小有效凭据数。如果可用凭据少于此值，将打印警告。 | `1` |
 | `public_url` | `string` (可选) | **（推荐用于生产环境）** 服务的公开访问 URL。如果设置此项，OAuth 认证将使用此 URL 构建回调地址。<br>**⚠️ 重要:** 您填写的此 URL 加上 `/oauth2/callback` 的路径（例如 `https://your-domain.com/oauth2/callback`）**必须**被添加到您 Google Cloud Console 项目的 OAuth 2.0 客户端 ID 的“已获授权的重定向 URI”列表中。如果留空，服务将尝试从请求头中自动推断（适用于本地 `localhost` 测试）。 | `null` |
 | `log_level` | `string` | 日志级别 (DEBUG, INFO, WARNING, ERROR)。 | `"debug"` |
@@ -198,14 +198,15 @@ python -m gemini_cli_openaiapi_proxy run -c config.json --encryption-key "your-s
 ### 1. 服务层 (`services/`)
 - **`CredentialManager`**: 凭据管理器。负责加载、持久化和轮转凭据。内置两个后台任务：
     1.  **刷新循环**: 自动使用 `refresh_token` 刷新即将过期或失效的凭据。
-    2.  **健康检查循环**: 在系统空闲时，主动对凭据进行健康检查。检查失败的凭据会被标记为 `SUSPECTED`（可疑）状态，但仍可使用，若后续使用成功则会自动“自愈”。
+    2.  **健康检查循环**: 在系统空闲时，主动对状态为 `ACTIVE` 或 `SUSPECTED` 的凭据进行健康检查。这不仅能提前发现失效凭据，还能让“可疑”凭据在无需等待实际请求的情况下自动恢复，提升了凭据池的自愈能力。
 - **`GoogleApiClient`**: Google API 客户端。基于 `httpx.AsyncClient` 实现全异步请求，并包含完整的请求重试逻辑。
 - **`UsageTracker`**: 用量追踪器。在内存中精确统计每个 `auth_key` 和 `credential` 的用量。
 - **`HealthCheckService`**: 健康检查器。封装了多种原子检查策略（如检查模型列表、用户信息等），并随机选取一种执行，以避免行为模式被预测。
 - **`StateTracker`**: 系统状态追踪器。通过中间件实时追踪并发请求数，为健康检查提供“系统是否空闲”的判断依据。
 
 ### 2. 工具层 (`utils/`)
-- **`credential_tools.py`**: 提供凭据序列化/反序列化，以及 `project-id` 发现的公共函数。
+- **`credential_tools.py`**: 提供处理凭据的底层工具，核心是负责在 Google 官方的 `Credentials` 对象和可序列化的 `SimpleCredential` 字典之间进行转换，并提供 `project-id` 发现的公共函数。
+。
 - **`sanitizer.py`**: 提供用于日志输出的敏感信息脱敏工具。
 
 ### 3. API 层 (`api/`)
@@ -229,6 +230,7 @@ gemini_cli_openaiapi_proxy/
 ├── api/                 # API 表现层
 │   ├── dependencies.py
 │   ├── security.py
+│   ├── exception_handlers.py
 │   └── routes/
 │       ├── admin.py
 │       ├── gemini.py

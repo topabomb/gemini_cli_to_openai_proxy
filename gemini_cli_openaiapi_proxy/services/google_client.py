@@ -209,8 +209,22 @@ class GoogleApiClient:
                 last_error = e
                 log_msg = f"[ApiClient] Request failed with status {e.response.status_code} for {cred_id_for_log}."
                 failure_reason = str(e.response.status_code)
+                if e.response.status_code in [400, 404]:
+                    log_msg += " This is a non-retriable client error."
+                    logger.warning(log_msg)
+                    # 请求级错误，不惩罚凭据，不重试，直接透传错误
+                    await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
+                    error_text = await e.response.aread()
+                    return self._create_error_response(f"API request failed: {error_text.decode(errors='ignore')}", e.response.status_code, is_streaming=False)
 
-                if e.response.status_code == 429 and attempt < max_retries - 1:
+                elif e.response.status_code == 401 and attempt < max_retries - 1:
+                    log_msg += " Marking credential as EXPIRED and retrying."
+                    logger.warning(log_msg)
+                    await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
+                    managed_cred.mark_expired()
+                    continue
+
+                elif e.response.status_code == 429 and attempt < max_retries - 1:
                     log_msg += " Marking credential as RATE_LIMITED and retrying."
                     logger.warning(log_msg)
                     await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
@@ -318,8 +332,23 @@ class GoogleApiClient:
                 last_error = e
                 log_msg = f"[ApiClient] Request failed with status {e.response.status_code} for {cred_id_for_log}."
                 failure_reason = str(e.response.status_code)
+                if e.response.status_code in [400, 404]:
+                    log_msg += " This is a non-retriable client error."
+                    logger.warning(log_msg)
+                    # 请求级错误，不惩罚凭据，不重试，直接透传错误
+                    await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
+                    error_text = await e.response.aread()
+                    yield self._create_error_sse_chunk(f"API request failed with status {e.response.status_code}:{error_text.decode(errors='ignore')}", e.response.status_code)
+                    return
 
-                if e.response.status_code == 429 and attempt < max_retries - 1:
+                elif e.response.status_code == 401 and attempt < max_retries - 1:
+                    log_msg += " Marking credential as EXPIRED and retrying."
+                    logger.warning(log_msg)
+                    await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
+                    managed_cred.mark_expired()
+                    continue
+
+                elif e.response.status_code == 429 and attempt < max_retries - 1:
                     log_msg += " Marking credential as RATE_LIMITED and retrying."
                     logger.warning(log_msg)
                     await self.usage_tracker.record_failed_request(auth_key, managed_cred.id, model, reason=failure_reason)
