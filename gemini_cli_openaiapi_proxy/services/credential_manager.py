@@ -27,7 +27,7 @@ from ..core.config import (
 )
 from ..core.types import CredentialStatus, ManagedCredential
 from ..utils.sanitizer import sanitize_email, sanitize_project_id
-from ..utils.credential_tools import SimpleCredential, build_credentials_from_simple, credentials_to_simple, get_email_from_credentials, discover_project_id
+from ..utils.credential_tools import SimpleCredential, build_credentials_from_simple, credentials_to_simple, get_client_metadata, get_email_from_credentials,determine_project_id, loadCodeAssist
 from .state_tracker import SystemStateTracker
 from .health_checker import HealthCheckService
 
@@ -149,6 +149,14 @@ class CredentialManager:
                     
                     # 这个方法现在会更智能，如果元数据已存在，则避免网络调用
                     await self._update_managed_credential_metadata(mc)
+                    
+                    # 用户上船
+                    onboard_success = await self._onboard_user(mc)
+                    if not onboard_success:
+                        # _onboard_user 内部会记录详细错误，这里只记录跳过
+                        logger.warning(f"[CredManager] Skipping credential {mc.log_safe_id} due to onboarding failure.")
+                        continue
+
                     self.credentials.append(mc)
                 except Exception as e:
                     logger.warning(f"[CredManager] Skipping invalid credential item {idx}: {e}")
@@ -156,6 +164,66 @@ class CredentialManager:
         logger.info(f"[CredManager] Loaded {len(self.credentials)} valid credentials.")
         if any(c.status == CredentialStatus.ACTIVE for c in self.credentials):
             self._persist_current_state()
+    async def _onboard_user(self, mc: ManagedCredential) -> bool:
+        """
+        为用户激活 Code Assist 服务（“上船”）。
+        包含重试和超时逻辑。
+        """
+        sanitized_email = sanitize_email(mc.email)
+        try:
+            info = await loadCodeAssist(mc.credentials, self.http_client)
+            
+            if info.get("currentTier"):
+                logger.info(f"[Onboarding] User {sanitized_email} is already onboarded.")
+                return True
+
+            tier = info.get("currentTier")
+            if not tier:
+                for t in info.get("allowedTiers", []):
+                    if t.get("isDefault"):
+                        tier = t
+                        break
+                if not tier:
+                    tier = {"id": "legacy-tier", "userDefinedCloudaicompanionProject": True}
+            
+            logger.info(f"[Onboarding] Attempting to onboard user {sanitized_email} with tier '{tier.get('id')}'.")
+
+            payload = {
+                "tierId": tier.get("id"),
+                "cloudaicompanionProject": mc.project_id,
+                "metadata": get_client_metadata(mc.project_id)
+            }
+
+            max_retries = 30  # 最多轮询30次，约30秒
+            for i in range(max_retries):
+                resp = await self.http_client.post(
+                    f"{CODE_ASSIST_ENDPOINT}/v1internal:onboardUser",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {mc.credentials.token}", "Content-Type": "application/json"},
+                    timeout=10
+                )
+
+                if resp.status_code == 200:
+                    response_data = resp.json()
+                    if response_data.get("done"):
+                        logger.info(f"[Onboarding] User {sanitized_email} onboarding successful.")
+                        return True
+                    
+                    logger.debug(f"[Onboarding] Waiting for user {sanitized_email}, attempt {i + 1}/{max_retries}...")
+                    await asyncio.sleep(1)
+                else:
+                    logger.error(
+                        f"[Onboarding] Failed for {sanitized_email}. Status: {resp.status_code}, Response: {resp.text}"
+                    )
+                    return False
+            
+            logger.error(f"[Onboarding] Timed out for user {sanitized_email} after {max_retries} attempts.")
+            return False
+
+        except Exception as e:
+            logger.error(f"[Onboarding] Exception for {sanitized_email}: {e}", exc_info=True)
+            return False
+        
 
     async def _update_managed_credential_metadata(self, mc: ManagedCredential):
         """
@@ -176,8 +244,7 @@ class CredentialManager:
         # 2. 如果 project_id 缺失，则填充
         if not mc.project_id:
             logger.info(f"[CredManager] Project ID for {sanitized_email} not found in file, determining now...")
-            project_id_map = self.settings.get("project_id_map", {})
-            pid = project_id_map.get(mc.email) or await discover_project_id(mc.credentials, self.http_client)
+            pid=await determine_project_id(mc.credentials, self.settings.get("project_id_map", {}), self.http_client)
             
             if not pid:
                 mc.mark_as_permanent_error("Failed to discover project_id")
@@ -214,15 +281,17 @@ class CredentialManager:
         # 确定项目ID
         final_project_id = project_id_override
         if not final_project_id:
-            project_id_map = self.settings.get("project_id_map", {})
-            final_project_id = project_id_map.get(new_email) or await discover_project_id(new_creds, self.http_client)
+            final_project_id=await determine_project_id(new_creds,self.settings.get("project_id_map",{}),self.http_client)
         
         if not final_project_id:
             logger.warning(f"[CredManager] Add/Update for {sanitized_email} failed: could not determine project_id.")
             return False, "failed_to_determine_project_id"
         
+        
+        
         sanitized_pid = sanitize_project_id(final_project_id)
         logger.debug(f"[CredManager] Using project_id '{sanitized_pid}' for {sanitized_email}.")
+
 
         for existing_cred in self.credentials:
             if existing_cred.email == new_email and (existing_cred.project_id is None or existing_cred.project_id == final_project_id):
@@ -241,6 +310,13 @@ class CredentialManager:
 
         new_id = f"cred-{len(self.credentials)}"
         mc = ManagedCredential(id=new_id, credentials=new_creds, email=new_email, project_id=final_project_id)
+        
+        # 用户上船
+        onboard_success = await self._onboard_user(mc)
+        if not onboard_success:
+            logger.warning(f"[CredManager] Failed to add credential for {sanitized_email} due to onboarding failure.")
+            return False, "onboarding_failed"
+
         self.credentials.append(mc)
         logger.info(
             f"[CredManager] Credential for {sanitized_email} with project_id '{sanitized_pid}' "

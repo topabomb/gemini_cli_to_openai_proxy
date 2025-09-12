@@ -5,6 +5,7 @@
 供服务端和客户端共享使用。
 """
 import logging
+import platform
 from typing_extensions import Any, Dict, List, Optional, TypedDict
 from google.oauth2.credentials import Credentials
 import httpx
@@ -33,6 +34,34 @@ class AddCredentialRequest(BaseModel):
     """用于添加新凭据请求的 Pydantic 模型。"""
     credential: SimpleCredential
 
+def get_platform_string():
+    """生成平台标识字符串（与 gemini-cli 一致）。"""
+    system = platform.system().upper()
+    arch = platform.machine().upper()
+
+    if system == "DARWIN":
+        if arch in ["ARM64", "AARCH64"]:
+            return "DARWIN_ARM64"
+        else:
+            return "DARWIN_AMD64"
+    elif system == "LINUX":
+        if arch in ["ARM64", "AARCH64"]:
+            return "LINUX_ARM64"
+        else:
+            return "LINUX_AMD64"
+    elif system == "WINDOWS":
+        return "WINDOWS_AMD64"
+    else:
+        return "PLATFORM_UNSPECIFIED"
+
+def get_client_metadata(project_id=None):
+    """构建客户端元数据。"""
+    return {
+        "ideType": "IDE_UNSPECIFIED",
+        "platform": get_platform_string(),
+        "pluginType": "GEMINI",
+        "duetProject": project_id,
+    }
 # ===== 序列化/反序列化 =====
 
 def _datetime_to_ms(dt: datetime) -> int:
@@ -91,17 +120,26 @@ async def get_email_from_credentials(creds: Credentials, http_client: httpx.Asyn
         logger.warning(f"Failed to get email via userinfo endpoint: {e}")
     return None
 
-async def discover_project_id(creds: Credentials, http_client: httpx.AsyncClient) -> Optional[str]:
-    """发现与凭据关联的 GCP 项目 ID。"""
+async def loadCodeAssist(creds: Credentials, http_client: httpx.AsyncClient):
     headers = {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
-    payload = {"metadata": {}}
+    payload = {"metadata": get_client_metadata()}
     try:
         resp = await http_client.post(f"{CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist", json=payload, headers=headers, timeout=20)
         resp.raise_for_status()
-        return resp.json().get("cloudaicompanionProject")
+        return resp.json()
+    except Exception as e:
+        raise RuntimeError(f"loadCodeAssist error:{str(e)}")
+
+
+async def discover_project_id(creds: Credentials, http_client: httpx.AsyncClient) -> Optional[str]:
+    """发现与凭据关联的 GCP 项目 ID。"""
+    try:
+        result=await loadCodeAssist(creds, http_client)
+        return result.get("cloudaicompanionProject") if result else None
     except Exception as e:
         logger.warning(f"Failed to discover project_id via API: {e}")
         return None
+    
 
 async def determine_project_id(
     creds: Credentials,

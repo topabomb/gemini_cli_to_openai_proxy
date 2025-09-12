@@ -65,25 +65,6 @@ HEALTH_CHECK_PROMPTS = [
 
 class GoogleApiClient:
 
-    async def check_userinfo_access(self, credential: ManagedCredential) -> Tuple[bool, str]:
-        """
-        原子健康检查：尝试获取用户信息。
-        """
-        try:
-            resp = await self.http_client.get(
-                "https://openidconnect.googleapis.com/v1/userinfo",
-                headers={"Authorization": f"Bearer {credential.credentials.token}"},
-                timeout=10
-            )
-            resp.raise_for_status()
-            message = "Successfully fetched user info."
-            logger.debug(f"Health check '{self.check_userinfo_access.__name__}' successful for {credential.log_safe_id}: {message}")
-            return True, message
-        except Exception as e:
-            message = f"Health check '{self.check_userinfo_access.__name__}' failed. Error: {e}"
-            logger.warning(f"For credential '{credential.log_safe_id}': {message}")
-            return False, message
-
     async def check_simple_model_call(self, credential: ManagedCredential) -> Tuple[bool, str]:
         """
         原子健康检查：尝试一次极简的模型调用，精确模拟真实请求。
@@ -98,7 +79,7 @@ class GoogleApiClient:
         logger.debug(f"Performing '{self.check_simple_model_call.__name__}' for {credential.log_safe_id} with prompt: '{sent_text}'")
 
         try:
-            # 最终修正：直接调用内部的 _prepare_request_components 来确保 URL 和 payload 100% 一致
+            # 直接调用内部的 _prepare_request_components 来确保 URL 和 payload 100% 一致
             post_data, target_url, headers, timeout_config = self._prepare_request_components(
                 managed_cred=credential,
                 model=model_name,
@@ -128,6 +109,41 @@ class GoogleApiClient:
             message = f"Health check '{self.check_simple_model_call.__name__}' failed. Error: {e}"
             logger.warning(f"For credential '{credential.log_safe_id}': {message}")
             return False, message
+    async def _check_token_counter(self, credential: ManagedCredential) -> Tuple[bool, str]:
+        """
+        原子健康检查：通过使用countTokens API来验证凭据在项目上下文中的执行权限。
+        """
+        check_name = "token_counter"
+        url = f"{CODE_ASSIST_ENDPOINT}/v1internal:countTokens"
+        gemini_request = random.choice(HEALTH_CHECK_PROMPTS)
+        payload = {
+            "request": {
+            "model": "models/gemini-2.5-flash-lite",
+            "contents": gemini_request["contents"][0] #[{"parts": [{"text": "health check"}]}]
+            }
+        }
+        
+        try:
+            response = await self.http_client.post(
+                url,
+                headers={"Authorization": f"Bearer {credential.credentials.token}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=10
+            )
+            if response.status_code == 200:
+                response_data = response.json()
+                message = f"Successfully counted tokens.{response_data.get('totalTokens','No message returned.')}"
+                logger.debug(f"Health check '{check_name}' passed for {credential.log_safe_id}: {message}")
+                return True, message
+            else:
+                message = f"Failed to count tokens. Status: {response.status_code}, Response: {response.text}"
+                logger.warning(f"Health check '{check_name}' failed for {credential.log_safe_id}: {message}")
+                return False, message
+        except Exception as e:
+            message = f"Exception in '{check_name}' for {credential.log_safe_id}. Error: {e}"
+            logger.error(message, exc_info=True)
+            return False, message
+
     """
     一个全异步的 Google API 客户端。
     """
