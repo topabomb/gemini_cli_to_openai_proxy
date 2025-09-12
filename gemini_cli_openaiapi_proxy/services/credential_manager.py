@@ -409,38 +409,7 @@ class CredentialManager:
         self._write_file(cast(List[Dict[str, Any]], items_to_persist))
         logger.debug("[CredManager] Persisted current credentials state to file.")
 
-    def _should_proactively_refresh(self, c: ManagedCredential) -> bool:
-        """判断一个凭据是否应该由后台循环进行主动刷新。"""
-        now = datetime.now(timezone.utc)
-
-        if not c.credentials.refresh_token:
-            return False
-
-        # 1. 安全锁：不要触碰最近活跃过的凭据。
-        if c.last_used_at and (now - c.last_used_at) < timedelta(minutes=30):
-            return False
-
-        # 2. 恢复性刷新：用于从速率限制中恢复的凭据。
-        is_rate_limited_and_recovered = (
-            c.status == CredentialStatus.RATE_LIMITED and
-            c.rate_limited_until and now > c.rate_limited_until
-        )
-        if is_rate_limited_and_recovered:
-            return True
-
-        # 3. 预防性/修复性刷新：用于即将过期或已过期的凭据。
-        is_in_expiry_check_scope = c.status in [
-            CredentialStatus.ACTIVE,
-            CredentialStatus.SUSPECTED,
-            CredentialStatus.EXPIRED
-        ]
-        if is_in_expiry_check_scope and c.credentials.expiry:
-            random_expiry_window = timedelta(minutes=random.randint(1, 10))
-            # 如果凭据将在随机窗口内过期（这也包含了已经过期的情况），则刷新。
-            if c.credentials.expiry.replace(tzinfo=timezone.utc) < now + random_expiry_window:
-                return True
-        
-        return False
+    
 
     async def _refresh_loop(self):
         while True:
@@ -450,7 +419,7 @@ class CredentialManager:
                 candidates_to_refresh = []
                 async with self.lock:
                     # 这里的锁至关重要，以防止在迭代过程中列表大小发生变化。
-                    candidates_to_refresh = [c for c in self.credentials if self._should_proactively_refresh(c)]
+                    candidates_to_refresh = [c for c in self.credentials if c.should_proactively_refresh()]
                 
                 if candidates_to_refresh:
                     # 使用 id 去重，尽管逻辑上应该能防止重复，但这是一种安全措施。
@@ -571,7 +540,7 @@ class CredentialManager:
         previous_status = target_cred.status
         
         logger.info(f"Force running health check on credential: {target_cred.log_safe_id}")
-        if self._should_proactively_refresh(target_cred):
+        if target_cred.should_proactively_refresh():
             await self._refresh_credential(target_cred)
         check_result = await self.health_checker.check(target_cred)
         is_healthy = check_result.get("is_healthy", False)

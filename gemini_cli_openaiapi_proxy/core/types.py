@@ -8,6 +8,7 @@
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
+import random
 from typing import Optional, Callable, Awaitable, Tuple
 
 from google.oauth2.credentials import Credentials
@@ -57,6 +58,38 @@ class ManagedCredential:
     def log_safe_id(self) -> str:
         """返回一个对日志安全的凭据标识符。"""
         return f"{self.id}({sanitize_email(self.email)})"
+    def should_proactively_refresh(self, ) -> bool:
+        """判断一个凭据是否应该由后台循环进行主动刷新。"""
+        now = datetime.now(timezone.utc)
+
+        if not self.credentials.refresh_token:
+            return False
+
+        # 1. 安全锁：不要触碰最近活跃过的凭据。
+        if self.last_used_at and (now - self.last_used_at) < timedelta(minutes=30) and self.status != CredentialStatus.EXPIRED:
+            return False
+
+        # 2. 恢复性刷新：用于从速率限制中恢复的凭据。
+        is_rate_limited_and_recovered = (
+            self.status == CredentialStatus.RATE_LIMITED and
+            self.rate_limited_until and now > self.rate_limited_until
+        )
+        if is_rate_limited_and_recovered:
+            return True
+
+        # 3. 预防性/修复性刷新：用于即将过期或已过期的凭据。
+        is_in_expiry_check_scope = self.status in [
+            CredentialStatus.ACTIVE,
+            CredentialStatus.SUSPECTED,
+            CredentialStatus.EXPIRED
+        ]
+        if is_in_expiry_check_scope and self.credentials.expiry:
+            random_expiry_window = timedelta(minutes=random.randint(1, 10))
+            # 如果凭据将在随机窗口内过期（这也包含了已经过期的情况），则刷新。
+            if self.credentials.expiry.replace(tzinfo=timezone.utc) < now + random_expiry_window:
+                return True
+        
+        return False
 
     def is_available(self) -> bool:
         """检查凭据当前是否可用，并在此过程中更新瞬时状态（如过期）。"""
