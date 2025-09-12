@@ -1,6 +1,8 @@
 """
-This module provides typed utilities for handling credential serialization
-and project ID discovery, shared between the server and the client.
+凭据处理工具模块。
+
+提供凭据序列化/反序列化、项目ID发现等类型安全的工具函数，
+供服务端和客户端共享使用。
 """
 import logging
 from typing_extensions import Any, Dict, List, Optional, TypedDict
@@ -13,35 +15,38 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-# ===== Data Models =====
+# ===== 数据模型 =====
 
-class SimpleCredential(TypedDict):
-    """A typed dictionary representing the essential, serializable fields of a credential."""
+class SimpleCredential(TypedDict, total=False):
+    """
+    一个类型化的字典，用于表示凭据中可被序列化的核心字段。
+    `total=False` 允许 `project_id` 等键为可选，以实现向后兼容。
+    """
     access_token: Optional[str]
     refresh_token: Optional[str]
     token_type: str
-    expiry_date: Optional[int]  # Milliseconds
+    expiry_date: Optional[int]  # 毫秒时间戳
     scopes: List[str]
+    project_id: Optional[str]
 
 class AddCredentialRequest(BaseModel):
-    """Pydantic model for the request to add a new credential."""
+    """用于添加新凭据请求的 Pydantic 模型。"""
     credential: SimpleCredential
-    project_id: Optional[str] = None
 
-# ===== Serialization/Deserialization =====
+# ===== 序列化/反序列化 =====
 
 def _datetime_to_ms(dt: datetime) -> int:
-    """Converts a UTC datetime object to milliseconds since the epoch."""
+    """将 UTC datetime 对象转换为毫秒时间戳。"""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return int(dt.timestamp() * 1000)
 
 def _ms_to_datetime(ms: int) -> datetime:
-    """Converts milliseconds since the epoch to a UTC datetime object."""
+    """将毫秒时间戳转换为 UTC datetime 对象。"""
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
 
-def credentials_to_simple(creds: Credentials) -> SimpleCredential:
-    """Serializes a Credentials object into a SimpleCredential typed dict."""
+def credentials_to_simple(creds: Credentials,project_id:Optional[str]) -> SimpleCredential:
+    """将 Credentials 对象序列化为 SimpleCredential 字典。"""
     expiry_ms = _datetime_to_ms(creds.expiry) if creds.expiry else None
     simple: SimpleCredential = {
         "access_token": creds.token,
@@ -49,11 +54,12 @@ def credentials_to_simple(creds: Credentials) -> SimpleCredential:
         "token_type": "Bearer",
         "expiry_date": expiry_ms,
         "scopes": creds.scopes or [],
+        "project_id": project_id,
     }
     return simple
 
 def build_credentials_from_simple(simple: SimpleCredential) -> Credentials:
-    """Builds a Credentials object from a simple dictionary."""
+    """从 SimpleCredential 字典构建一个 Credentials 对象。"""
     scopes_to_use = simple.get("scopes")
     if not scopes_to_use:
         scopes_to_use = SCOPES
@@ -72,10 +78,10 @@ def build_credentials_from_simple(simple: SimpleCredential) -> Credentials:
         creds.expiry = _ms_to_datetime(int(expiry_ms))
     return creds
 
-# ===== Project ID Discovery =====
+# ===== Project ID 发现 =====
 
 async def get_email_from_credentials(creds: Credentials, http_client: httpx.AsyncClient) -> Optional[str]:
-    """Fetches the user's email address using the provided credentials."""
+    """使用给定的凭据获取用户的电子邮件地址。"""
     headers = {"Authorization": f"Bearer {creds.token}"}
     try:
         resp = await http_client.get("https://openidconnect.googleapis.com/v1/userinfo", headers=headers, timeout=10)
@@ -86,7 +92,7 @@ async def get_email_from_credentials(creds: Credentials, http_client: httpx.Asyn
     return None
 
 async def discover_project_id(creds: Credentials, http_client: httpx.AsyncClient) -> Optional[str]:
-    """Discovers the GCP project ID associated with the credentials."""
+    """发现与凭据关联的 GCP 项目 ID。"""
     headers = {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
     payload = {"metadata": {}}
     try:
@@ -103,20 +109,20 @@ async def determine_project_id(
     http_client: httpx.AsyncClient
 ) -> Optional[str]:
     """
-    Determines the project ID using a priority-based approach:
-    1. Check the provided project_id_map.
-    2. Fall back to discovering via API call.
+    通过一个基于优先级的策略来确定项目ID：
+    1. 检查配置中提供的 `project_id_map`。
+    2. 回退到通过 API 调用进行发现。
     """
     email = await get_email_from_credentials(creds, http_client)
     if not email:
         logger.warning("Could not determine project ID because email could not be fetched.")
         return None
 
-    # 1. Check map first
+    # 1. 首先检查映射表
     if project_id := project_id_map.get(email):
         logger.info(f"Found project ID '{project_id}' in config map for email '{email}'.")
         return project_id
 
-    # 2. Fall back to API discovery
+    # 2. 回退到 API 发现
     logger.info(f"Project ID for '{email}' not in config map, attempting API discovery.")
     return await discover_project_id(creds, http_client)

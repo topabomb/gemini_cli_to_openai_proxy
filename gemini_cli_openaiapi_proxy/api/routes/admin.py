@@ -239,12 +239,15 @@ async def add_credential_api(
     cred_manager: CredentialManager = Depends(get_credential_manager)
 ):
     """
-    Receives a serialized credential and an optional project_id, then adds it to the pool.
-    This endpoint is protected by admin Basic Auth.
+    通过 API 接收一个序列化的凭据（其中可能包含 project_id）并将其添加到池中。
+    此端点受管理员 Basic Auth 保护。
     """
+    # project_id 现在是凭据负载本身的一部分。
+    project_id_from_payload = payload.credential.get("project_id")
+    
     creds = build_credentials_from_simple(payload.credential)
 
-    ok, reason = await cred_manager.add_or_update_credential(creds, project_id_override=payload.project_id)
+    ok, reason = await cred_manager.add_or_update_credential(creds, project_id_override=project_id_from_payload)
 
     if ok:
         email = "N/A"

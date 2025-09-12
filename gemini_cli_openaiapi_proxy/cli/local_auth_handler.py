@@ -1,5 +1,5 @@
 """
-This module handles the local OAuth2 flow for the 'auth' CLI command.
+此模块处理 'auth' CLI 命令的本地 OAuth2 流程。
 """
 import asyncio
 import sys
@@ -13,7 +13,7 @@ from ..core.config import SettingsDict, CLIENT_ID, CLIENT_SECRET, SCOPES
 from ..utils.credential_tools import credentials_to_simple, determine_project_id
 
 class _OAuthCallbackHandler(BaseHTTPRequestHandler):
-    """A simple HTTP handler to capture the OAuth2 callback."""
+    """一个简单的 HTTP 处理器，用于捕获 OAuth2 回调。"""
     auth_code = None
     error = None
 
@@ -33,35 +33,34 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
             self.wfile.write(f"<h1>Authentication Failed</h1><p>Reason: {self.error}. Please try again.</p>".encode())
 
     def log_message(self, format, *args):
-        # Suppress logging to keep the console clean
+        # 抑制日志记录以保持控制台干净
         return
 
 async def execute_local_oauth_flow(settings: SettingsDict):
     """
-    Orchestrates the entire local OAuth2 flow from start to finish.
+    协调从开始到结束的整个本地 OAuth2 流程。
     """
-    # Create a temporary http client for project_id discovery
+    # 为 project_id 发现创建一个临时的 http 客户端
     async with httpx.AsyncClient() as client:
         await _execute_flow_with_client(settings, client)
 
 async def _execute_flow_with_client(settings: SettingsDict, client: httpx.AsyncClient):
-    # 1. Validate configuration
+    # 1. 验证配置
     auth_client_config = settings.get("auth_client")
     if not auth_client_config or not all(k in auth_client_config for k in ["proxy_url", "admin_username", "admin_password"]):
         print("[ERROR] 'auth_client' section is missing or incomplete in your config file.", file=sys.stderr)
         print("Please add 'proxy_url', 'admin_username', and 'admin_password' to the 'auth_client' section.", file=sys.stderr)
         sys.exit(1)
 
-    # 2. Set up local server on a dynamic port
+    # 2. 在动态端口上设置本地服务器
     try:
         server = HTTPServer(('127.0.0.1', 0), _OAuthCallbackHandler)
-        port = server.server_address[1]
-        redirect_uri = f"http://127.0.0.1:{port}"
+        redirect_uri = f"http://127.0.0.1:{server.server_address[1]}"
     except Exception as e:
         print(f"\n[ERROR] Failed to start local callback server: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # 3. Create OAuth flow and get authorization URL
+    # 3. 创建 OAuth 流程并获取授权 URL
     flow = Flow.from_client_config(
         client_config={
             "installed": {
@@ -76,13 +75,13 @@ async def _execute_flow_with_client(settings: SettingsDict, client: httpx.AsyncC
     )
     authorization_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
 
-    # 4. Prompt user and wait for authorization code
+    # 4. 提示用户并等待授权码
     print("Your browser has been opened to visit:")
     print(f"\n{authorization_url}\n")
     print("Please follow the instructions in your browser to complete authentication.")
     webbrowser.open(authorization_url)
 
-    server.handle_request() # Handle one request and close
+    server.handle_request() # 处理一个请求然后关闭
     server.server_close()
 
     auth_code = _OAuthCallbackHandler.auth_code
@@ -97,7 +96,7 @@ async def _execute_flow_with_client(settings: SettingsDict, client: httpx.AsyncC
 
     print("\nAuthentication code received, exchanging for refresh token...")
 
-    # 5. Exchange code for tokens
+    # 5. 交换授权码以获取令牌
     try:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, lambda: flow.fetch_token(code=auth_code))
@@ -115,7 +114,7 @@ async def _execute_flow_with_client(settings: SettingsDict, client: httpx.AsyncC
 
     print("Refresh token obtained, refreshing access token before submission...")
 
-    # 6. Refresh the token on the client side to ensure the access_token is valid
+    # 6. 在客户端刷新令牌以确保 access_token 有效
     try:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, creds.refresh, GoogleAuthRequest())
@@ -125,7 +124,7 @@ async def _execute_flow_with_client(settings: SettingsDict, client: httpx.AsyncC
 
     print("Access token refreshed, submitting to proxy server...")
 
-    # 7. Determine the project ID
+    # 7. 确定项目 ID
     print("Attempting to determine project ID...")
     project_id_map = settings.get("project_id_map", {})
     project_id = await determine_project_id(creds, project_id_map, client)
@@ -138,15 +137,15 @@ async def _execute_flow_with_client(settings: SettingsDict, client: httpx.AsyncC
     print(f"Project ID '{project_id}' determined successfully.")
     print("Submitting credential and project ID to proxy server...")
 
-    # 8. Submit the serialized credential and project ID to the proxy server
+    # 8. 将序列化的凭据（内嵌 project_id）提交到代理服务器
     proxy_url = auth_client_config["proxy_url"].rstrip('/')
     admin_user = auth_client_config["admin_username"]
     admin_pass = auth_client_config["admin_password"]
     
-    payload = {
-        "credential": credentials_to_simple(creds),
-        "project_id": project_id,
-    }
+    # 序列化凭据并直接嵌入 project_id
+    simple_cred = credentials_to_simple(creds,project_id)
+    
+    payload = {"credential": simple_cred}
 
     try:
         response = await client.post(

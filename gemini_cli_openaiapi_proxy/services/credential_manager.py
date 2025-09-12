@@ -132,7 +132,6 @@ class CredentialManager:
             self.credentials = []
             for idx, item in enumerate(simple_items):
                 try:
-                    # Cast the TypedDict to a regular Dict for the function call
                     creds = build_credentials_from_simple(item)
                     
                     is_expired = False
@@ -144,7 +143,11 @@ class CredentialManager:
                         logger.info(f"[CredManager] Credential {idx} expired, attempting refresh on load.")
                         await self._refresh_credential_object(creds)
                     
-                    mc = ManagedCredential(id=f"cred-{idx}", credentials=creds)
+                    # 如果文件中存在，则预先填充元数据
+                    project_id_from_file = item.get("project_id")
+                    mc = ManagedCredential(id=f"cred-{idx}", credentials=creds, project_id=project_id_from_file)
+                    
+                    # 这个方法现在会更智能，如果元数据已存在，则避免网络调用
                     await self._update_managed_credential_metadata(mc)
                     self.credentials.append(mc)
                 except Exception as e:
@@ -155,39 +158,45 @@ class CredentialManager:
             self._persist_current_state()
 
     async def _update_managed_credential_metadata(self, mc: ManagedCredential):
-        email = await get_email_from_credentials(mc.credentials, self.http_client)
-        if not email:
-            mc.status = CredentialStatus.ERROR
-            mc.failure_reason = "Failed to get email"
-            mc.failed_at = datetime.now(timezone.utc)
-            logger.warning(f"[CredManager] Credential {mc.id} missing email, marked as invalid.")
-            return
+        """
+        确保一个 ManagedCredential 对象的 email 和 project_id 被填充。
+        如果数据已存在，此方法会避免不必要的网络调用。
+        """
+        # 1. 如果 email 缺失，则填充
+        if not mc.email:
+            email = await get_email_from_credentials(mc.credentials, self.http_client)
+            if not email:
+                mc.mark_as_permanent_error("Failed to get email")
+                logger.warning(f"[CredManager] Credential {mc.id} missing email, marked as invalid.")
+                return
+            mc.email = email
+        
+        sanitized_email = sanitize_email(mc.email)
 
-        mc.email = email
-        project_id_map = self.settings.get("project_id_map", {})
-        pid = project_id_map.get(email)
-        if not pid:
-            pid = await discover_project_id(mc.credentials, self.http_client)
+        # 2. 如果 project_id 缺失，则填充
+        if not mc.project_id:
+            logger.info(f"[CredManager] Project ID for {sanitized_email} not found in file, determining now...")
+            project_id_map = self.settings.get("project_id_map", {})
+            pid = project_id_map.get(mc.email) or await discover_project_id(mc.credentials, self.http_client)
+            
+            if not pid:
+                mc.mark_as_permanent_error("Failed to discover project_id")
+                logger.warning(f"[CredManager] Credential {mc.id} for {sanitized_email} missing project_id, marked as invalid.")
+                return
+            mc.project_id = pid
         
-        if not pid:
-            mc.status = CredentialStatus.ERROR
-            mc.failure_reason = "Failed to discover project_id"
-            mc.failed_at = datetime.now(timezone.utc)
-            logger.warning(f"[CredManager] Credential {mc.id} for {email} missing project_id, marked as invalid.")
-            return
-        
-        mc.project_id = pid
-        logger.debug(f"[CredManager] Updated metadata for {mc.id}: email={sanitize_email(email)}, project_id={sanitize_project_id(pid)}")
+        sanitized_pid = sanitize_project_id(mc.project_id)
+        logger.debug(f"[CredManager] Ensured metadata for {mc.id}: email={sanitized_email}, project_id={sanitized_pid}")
 
     async def add_or_update_credential(
         self, new_creds: Credentials, project_id_override: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
-        Adds or updates a credential.
-        The project ID is determined with the following priority:
-        1. `project_id_override` argument.
-        2. `project_id_map` in settings.
-        3. API discovery.
+        添加或更新一个凭据。
+        项目ID按以下优先级确定：
+        1. `project_id_override` 参数。
+        2. 配置文件中的 `project_id_map`。
+        3. 通过 API 自动发现。
         """
         logger.debug(f"[CredManager] Received new credential with scopes: {new_creds.scopes}")
         if not new_creds.refresh_token:
@@ -200,9 +209,9 @@ class CredentialManager:
             return False, "failed_to_get_email"
         
         sanitized_email = sanitize_email(new_email)
-        logger.info(f"[CredManager] Processing credential for user: {sanitized_email}")
+        logger.debug(f"[CredManager] Processing credential for user: {sanitized_email}")
 
-        # Determine the project ID
+        # 确定项目ID
         final_project_id = project_id_override
         if not final_project_id:
             project_id_map = self.settings.get("project_id_map", {})
@@ -213,11 +222,14 @@ class CredentialManager:
             return False, "failed_to_determine_project_id"
         
         sanitized_pid = sanitize_project_id(final_project_id)
-        logger.info(f"[CredManager] Using project_id '{sanitized_pid}' for {sanitized_email}.")
+        logger.debug(f"[CredManager] Using project_id '{sanitized_pid}' for {sanitized_email}.")
 
         for existing_cred in self.credentials:
             if existing_cred.email == new_email and (existing_cred.project_id is None or existing_cred.project_id == final_project_id):
-                logger.info(f"[CredManager] Updating existing credential for {sanitized_email} (id: {existing_cred.id}).")
+                logger.info(
+                    f"[CredManager] Credential for {sanitized_email} with project_id '{sanitized_pid}' "
+                    f"was updated successfully (id: {existing_cred.id})."
+                )
                 existing_cred.credentials = new_creds
                 existing_cred.project_id = final_project_id
                 existing_cred.status = CredentialStatus.ACTIVE
@@ -227,10 +239,13 @@ class CredentialManager:
                 self._persist_current_state()
                 return True, "credential_updated"
 
-        logger.info(f"[CredManager] Adding new credential for {sanitized_email}.")
         new_id = f"cred-{len(self.credentials)}"
         mc = ManagedCredential(id=new_id, credentials=new_creds, email=new_email, project_id=final_project_id)
         self.credentials.append(mc)
+        logger.info(
+            f"[CredManager] Credential for {sanitized_email} with project_id '{sanitized_pid}' "
+            f"was added successfully (id: {new_id})."
+        )
         self._persist_current_state()
         return True, "credential_added"
 
@@ -309,10 +324,47 @@ class CredentialManager:
         await loop.run_in_executor(None, creds.refresh, GoogleAuthRequest())
 
     def _persist_current_state(self):
-        # Cast to List[Dict[str, Any]] to satisfy the type checker for _write_file
-        items: List[Dict[str, Any]] = [dict(credentials_to_simple(c.credentials)) for c in self.credentials]
-        self._write_file(items)
+        items_to_persist: List[SimpleCredential] = []
+        for c in self.credentials:
+            simple_cred = credentials_to_simple(c.credentials,c.project_id)
+            items_to_persist.append(simple_cred)
+        
+        # 为了满足 _write_file 的类型检查，进行类型转换
+        self._write_file(cast(List[Dict[str, Any]], items_to_persist))
         logger.debug("[CredManager] Persisted current credentials state to file.")
+
+    def _should_proactively_refresh(self, c: ManagedCredential) -> bool:
+        """判断一个凭据是否应该由后台循环进行主动刷新。"""
+        now = datetime.now(timezone.utc)
+
+        if not c.credentials.refresh_token:
+            return False
+
+        # 1. 安全锁：不要触碰最近活跃过的凭据。
+        if c.last_used_at and (now - c.last_used_at) < timedelta(minutes=30):
+            return False
+
+        # 2. 恢复性刷新：用于从速率限制中恢复的凭据。
+        is_rate_limited_and_recovered = (
+            c.status == CredentialStatus.RATE_LIMITED and
+            c.rate_limited_until and now > c.rate_limited_until
+        )
+        if is_rate_limited_and_recovered:
+            return True
+
+        # 3. 预防性/修复性刷新：用于即将过期或已过期的凭据。
+        is_in_expiry_check_scope = c.status in [
+            CredentialStatus.ACTIVE,
+            CredentialStatus.SUSPECTED,
+            CredentialStatus.EXPIRED
+        ]
+        if is_in_expiry_check_scope and c.credentials.expiry:
+            random_expiry_window = timedelta(minutes=random.randint(1, 10))
+            # 如果凭据将在随机窗口内过期（这也包含了已经过期的情况），则刷新。
+            if c.credentials.expiry.replace(tzinfo=timezone.utc) < now + random_expiry_window:
+                return True
+        
+        return False
 
     async def _refresh_loop(self):
         while True:
@@ -320,43 +372,12 @@ class CredentialManager:
                 logger.debug("[CredManager] Identifying credentials for periodic refresh...")
                 
                 candidates_to_refresh = []
-                now = datetime.now(timezone.utc)
-                
                 async with self.lock:
-                    for c in self.credentials:
-                        if not c.credentials.refresh_token:
-                            continue
-
-                        # 1. 最高优先级安全锁：30分钟内活动过的凭据，绝对不碰
-                        if c.last_used_at and (now - c.last_used_at) < timedelta(minutes=30):
-                            continue
-
-                        # --- 从这里开始，处理的是已空闲超过1小时的凭据 ---
-
-                        # 2. 恢复性刷新：恢复冷却结束的速率限制凭据
-                        is_rate_limited_and_recovered = (
-                            c.status == CredentialStatus.RATE_LIMITED and
-                            c.rate_limited_until and now > c.rate_limited_until
-                        )
-                        if is_rate_limited_and_recovered:
-                            candidates_to_refresh.append(c)
-                            continue
-
-                        # 3. 预防性/修复性刷新：处理其他可刷新状态的凭据
-                        is_in_expiry_check_scope = c.status in [
-                            CredentialStatus.ACTIVE,
-                            CredentialStatus.SUSPECTED,
-                            CredentialStatus.EXPIRED
-                        ]
-                        if is_in_expiry_check_scope and c.credentials.expiry:
-                            random_expiry_window = timedelta(minutes=random.randint(1, 10))
-                            # 如果凭据即将在随机窗口内过期（这也包含了已经过期的情况），则刷新
-                            if c.credentials.expiry.replace(tzinfo=timezone.utc) < now + random_expiry_window:
-                                candidates_to_refresh.append(c)
-                                continue
+                    # 这里的锁至关重要，以防止在迭代过程中列表大小发生变化。
+                    candidates_to_refresh = [c for c in self.credentials if self._should_proactively_refresh(c)]
                 
                 if candidates_to_refresh:
-                    # 使用 id 进行去重，并重建 ManagedCredential 对象列表
+                    # 使用 id 去重，尽管逻辑上应该能防止重复，但这是一种安全措施。
                     unique_candidates_map = {c.id: c for c in candidates_to_refresh}
                     unique_candidates = list(unique_candidates_map.values())
                     if unique_candidates:
@@ -364,7 +385,7 @@ class CredentialManager:
                         for c in unique_candidates:
                             await self._refresh_credential(c)
 
-                # 4. 固定循环间隔
+                # 固定循环间隔
                 await asyncio.sleep(60)
             except asyncio.CancelledError:
                 logger.info("[CredManager] Refresh loop cancelled.")
@@ -398,7 +419,7 @@ class CredentialManager:
                     
                     candidates = [
                         c for c in self.credentials
-                        if c.status == CredentialStatus.ACTIVE and 
+                        if c.status in [CredentialStatus.ACTIVE, CredentialStatus.SUSPECTED] and 
                            c.credentials.refresh_token and
                            (not c.last_used_at or (now - c.last_used_at) > idle_threshold)
                     ]
@@ -417,10 +438,11 @@ class CredentialManager:
                     # 在锁内更新状态
                     async with self.lock:
                         # 再次确认凭据状态没有在检查期间被改变
-                        if target_cred.status == CredentialStatus.ACTIVE:
+                        if target_cred.status in [CredentialStatus.ACTIVE, CredentialStatus.SUSPECTED]:
                             if not is_healthy:
                                 target_cred.mark_suspected()
                             else:
+                                # 无论之前是 ACTIVE 还是 SUSPECTED，只要检查通过，就标记为健康
                                 # 如果检查通过，可以认为它“被使用”了一次，以更新其 last_used_at 时间戳
                                 target_cred.mark_used()
                 else:
@@ -473,7 +495,8 @@ class CredentialManager:
         previous_status = target_cred.status
         
         logger.info(f"Force running health check on credential: {target_cred.log_safe_id}")
-        await self._refresh_credential(target_cred)
+        if self._should_proactively_refresh(target_cred):
+            await self._refresh_credential(target_cred)
         check_result = await self.health_checker.check(target_cred)
         is_healthy = check_result.get("is_healthy", False)
         
