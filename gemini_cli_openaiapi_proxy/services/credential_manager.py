@@ -133,7 +133,7 @@ class CredentialManager:
             for idx, item in enumerate(simple_items):
                 try:
                     # Cast the TypedDict to a regular Dict for the function call
-                    creds = build_credentials_from_simple(dict(item))
+                    creds = build_credentials_from_simple(item)
                     
                     is_expired = False
                     if creds.expiry:
@@ -473,6 +473,7 @@ class CredentialManager:
         previous_status = target_cred.status
         
         logger.info(f"Force running health check on credential: {target_cred.log_safe_id}")
+        await self._refresh_credential(target_cred)
         check_result = await self.health_checker.check(target_cred)
         is_healthy = check_result.get("is_healthy", False)
         

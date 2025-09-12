@@ -52,7 +52,7 @@ def credentials_to_simple(creds: Credentials) -> SimpleCredential:
     }
     return simple
 
-def build_credentials_from_simple(simple: Dict[str, Any]) -> Credentials:
+def build_credentials_from_simple(simple: SimpleCredential) -> Credentials:
     """Builds a Credentials object from a simple dictionary."""
     scopes_to_use = simple.get("scopes")
     if not scopes_to_use:

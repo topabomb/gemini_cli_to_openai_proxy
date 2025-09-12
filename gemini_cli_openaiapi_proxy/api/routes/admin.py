@@ -242,7 +242,7 @@ async def add_credential_api(
     Receives a serialized credential and an optional project_id, then adds it to the pool.
     This endpoint is protected by admin Basic Auth.
     """
-    creds = build_credentials_from_simple(dict(payload.credential))
+    creds = build_credentials_from_simple(payload.credential)
 
     ok, reason = await cred_manager.add_or_update_credential(creds, project_id_override=payload.project_id)
 
