@@ -18,7 +18,7 @@ import oauthlib.oauth2.rfc6749.parameters
 
 from ...core.config import CLIENT_ID, CLIENT_SECRET, SCOPES
 from ...services.credential_manager import CredentialManager
-from ...services.usage_tracker import UsageTracker
+from ...services.usage_tracker import UsageTracker, _format_human_readable
 from ..dependencies import get_credential_manager, get_usage_tracker
 from ..security import verify_admin_access
 from ...utils.credential_tools import AddCredentialRequest, build_credentials_from_simple
@@ -35,97 +35,160 @@ async def get_admin_ui(
 ):
     """提供一个包含实时统计信息的 HTML 管理界面。"""
     
-    # 1. 获取并处理凭据统计
     all_creds = cred_manager.get_all_credential_details()
     total_creds = len(all_creds)
     active_creds = sum(1 for c in all_creds if c.get("is_available"))
     inactive_creds = total_creds - active_creds
     
-    cred_stats_html = f"""
-        <h4>Credential Pool</h4>
-        <ul>
-            <li>Total Credentials: <strong>{total_creds}</strong></li>
-            <li>Available: <strong>{active_creds}</strong></li>
-            <li>Inactive/Exhausted: <strong>{inactive_creds}</strong></li>
-        </ul>
-    """
-    
-    # 2. 获取并处理用量统计
-    usage_summary = await usage_tracker.get_aggregated_usage_summary()
-    usage_html = "<h4>Usage by Model</h4>"
-    if usage_summary:
-        usage_html += """
-            <table>
-                <thead>
-                    <tr>
-                        <th>Model</th>
-                        <th>Request Count</th>
-                        <th>Total Tokens</th>
-                    </tr>
-                </thead>
-                <tbody>
-        """
-        for model, stats in usage_summary.items():
-            usage_html += f"""
-                <tr>
-                    <td>{model}</td>
-                    <td>{stats.get('successful_requests', 0)}</td>
-                    <td>{stats.get('total_tokens', 0)}</td>
-                </tr>
-            """
-        usage_html += "</tbody></table>"
-    else:
-        usage_html += "<p>No usage data recorded yet.</p>"
-
-    # 2.5. 生成手动检查链接
-    manual_check_links = "<h4>Manual Health Checks</h4><ul>"
+    # --- 生成凭据表格 ---
+    credentials_table_rows = ""
     if not all_creds:
-        manual_check_links += "<li>No credentials available to check.</li>"
+        credentials_table_rows = '<tr><td colspan="7" style="text-align: center;">No credentials available.</td></tr>'
     else:
         for cred in all_creds:
-            cred_id = cred.get('id')
-            cred_email = cred.get('email', 'N/A')
-            manual_check_links += f'<li><a href="/admin/credentials/{cred_id}/check" target="_blank">Check: {cred_id} ({cred_email})</a></li>'
-    manual_check_links += "</ul>"
+            cred_id = cred.get('id', 'N/A')
+            email = cred.get('email', 'N/A')
+            project_id = cred.get('project_id', 'N/A')
+            
+            credentials_table_rows += f"""
+                <tr id="cred-row-{cred_id}">
+                    <td>{cred_id}</td>
+                    <td>{email}</td>
+                    <td>{project_id}</td>
+                    <td>{cred.get('status', 'UNKNOWN')}</td>
+                    <td>{cred.get('expiry', 'N/A')}</td>
+                    <td>{cred.get('last_used_at', 'N/A')}</td>
+                    <td>
+                        <a href="/admin/credentials/{cred_id}/check" target="_blank" class="button">Check</a>
+                        <span onclick="deleteCredential('{cred_id}')" class="button">Delete</span>
+                    </td>
+                </tr>
+            """
 
-    # 3. 组装完整 HTML
+    # --- 生成用量表格 ---
+    usage_summary = await usage_tracker.get_aggregated_usage_summary()
+    usage_table_rows = ""
+    if not usage_summary:
+        usage_table_rows = '<tr><td colspan="5" style="text-align: center;">No usage data recorded yet.</td></tr>'
+    else:
+        for model, stats in usage_summary.items():
+            usage_table_rows += f"""
+                <tr>
+                    <td>{model}</td>
+                    <td>{_format_human_readable(stats.get('successful_requests', 0))}</td>
+                    <td>{_format_human_readable(stats.get('prompt_tokens', 0))}</td>
+                    <td>{_format_human_readable(stats.get('candidates_tokens', 0))}</td>
+                    <td>{_format_human_readable(stats.get('total_tokens', 0))}</td>
+                </tr>
+            """
+
+    # --- 组装完整 HTML ---
     content = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>Model API Proxy Management</title>
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.1; color: #333; }}
+            h2, h4 {{ margin: 0.6em 0 0.4em 0; }}
+            h4 {{ border-top: 1px solid #eee; padding-top: 0.6em; }}
+            table {{ width: 100%; border-collapse: collapse; }}
+            th, td {{ border: 1px solid #ddd; padding: 6px 8px; text-align: left; font-size: 0.9em; vertical-align: middle; }}
+            th {{ background-color: #f8f8f8; }}
+            ul {{ padding-left: 20px; margin: 0.5em 0; }}
+            .summary {{ text-align: right; font-size: 0.9em; margin: 0.5em 0 1.5em 0; }}
+            .button {{
+                display: inline-block;
+                background-color: #f0f0f0;
+                color: #333;
+                text-decoration: none;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                cursor: pointer;
+                padding: 4px 8px;
+                font-size: 0.9em;
+            }}
+            .button:hover {{ background-color: #e0e0e0; }}
+        </style>
     </head>
     <body>
         <h2>Model API Proxy Management</h2>
-        <hr/>
-        <div>
-            <h3>Live Statistics</h3>
-            {cred_stats_html}
-            {usage_html}
+
+        <h4>Managed Credentials</h4>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Email</th>
+                    <th>Project ID</th>
+                    <th>Status</th>
+                    <th>Expiry</th>
+                    <th>Last Used</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {credentials_table_rows}
+            </tbody>
+        </table>
+        <div class="summary">
+            <strong>Total:</strong> {total_creds} | <strong>Available:</strong> {active_creds} | <strong>Inactive:</strong> {inactive_creds}
         </div>
-        <div>
-            <h3>Actions</h3>
-            <p>Click the link below to start the Google OAuth2 process and add a new credential to the pool.</p>
-            <a href="/oauth2/login" target="_blank"><strong>Start Authentication</strong></a>
-        </div>
-        <div>
-            <h3>Endpoints</h3>
-            <ul>
-                <li><a href="/admin/credentials" >View Credentials Status (JSON)</a></li>
-                <li><a href="/admin/usage" >View Usage Stats (JSON)</a></li>
-                <li><a href="/health" >Health Check</a></li>
-            </ul>
-            {manual_check_links}
-        </div>
+
+        <h4>Usage by Model</h4>
+        <table>
+            <thead>
+                <tr>
+                    <th>Model</th>
+                    <th>Requests</th>
+                    <th>Prompt Tokens</th>
+                    <th>Output Tokens</th>
+                    <th>Total Tokens</th>
+                </tr>
+            </thead>
+            <tbody>
+                {usage_table_rows}
+            </tbody>
+        </table>
+
+        <h4>Actions</h4>
+        <a href="/oauth2/login" target="_blank" class="button" style="font-weight: bold; padding: 6px 12px;">Start Authentication</a>
+
+        <h4>Endpoints</h4>
+        <ul>
+            <li><a href="/admin/credentials">View Credentials Status (JSON)</a></li>
+            <li><a href="/admin/usage">View Usage Stats (JSON)</a></li>
+        </ul>
+
+        <script>
+            function deleteCredential(credentialId) {{
+                if (confirm(`Are you sure you want to delete credential: ${{credentialId}}?`)) {{
+                    fetch(`/admin/credentials/${{credentialId}}`, {{
+                        method: 'DELETE',
+                    }})
+                    .then(response => {{
+                        if (response.ok) {{
+                            const row = document.getElementById(`cred-row-${{credentialId}}`);
+                            if (row) row.remove();
+                            alert('Credential deleted successfully.');
+                            window.location.reload(); // Reload to update summary stats
+                        }} else {{
+                            response.json().then(data => {{
+                                alert(`Failed to delete credential: ${{data.detail || "Unknown error"}}`);
+                            }});
+                        }}
+                    }})
+                    .catch(error => {{
+                        console.error('Error:', error);
+                        alert('An error occurred while trying to delete the credential.');
+                    }});
+                }}
+            }}
+        </script>
     </body>
     </html>
     """
     return HTMLResponse(content=content)
-
-@router.get("/health")
-async def health_check():
-    """健康检查端点。"""
-    return {"status": "healthy"}
 
 @router.get("/oauth2/login")
 async def oauth2_login(request: Request):
@@ -262,3 +325,30 @@ async def add_credential_api(
         )
     else:
         raise HTTPException(status_code=400, detail=reason)
+
+@router.delete(
+    "/admin/credentials/{credential_id}",
+    summary="Delete a credential",
+    tags=["Admin & OAuth"],
+    status_code=200,
+    dependencies=[Depends(verify_admin_access)],
+    responses={
+        200: {"description": "Credential deleted successfully."},
+        404: {"description": "Credential not found."},
+        500: {"description": "Internal server error during deletion."},
+    }
+)
+async def delete_credential_api(
+    credential_id: str,
+    cred_manager: CredentialManager = Depends(get_credential_manager)
+):
+    """
+    从池中删除指定的凭据。
+    """
+    ok, reason = await cred_manager.delete_credential(credential_id)
+    if ok:
+        return JSONResponse(content={"status": "success", "message": reason})
+    elif reason == "credential_not_found":
+        raise HTTPException(status_code=404, detail=f"Credential with id '{credential_id}' not found.")
+    else:
+        raise HTTPException(status_code=500, detail=f"Failed to delete credential: {reason}")

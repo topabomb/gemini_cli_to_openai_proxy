@@ -46,6 +46,17 @@ def create_app(settings: SettingsDict) -> FastAPI:
 
     # 注册 API 路由
     from .api.routes import openai
+    from fastapi import APIRouter
+
+    # 创建一个用于公开端点的路由器
+    public_router = APIRouter()
+
+    @public_router.get("/health", tags=["Public"])
+    async def health_check():
+        """公开的健康检查端点。"""
+        return {"status": "healthy"}
+
+    app.include_router(public_router)
     app.include_router(admin.router)
     app.include_router(gemini.router)
     app.include_router(openai.router)

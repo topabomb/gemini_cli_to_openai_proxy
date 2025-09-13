@@ -564,30 +564,61 @@ class CredentialManager:
     def get_all_credential_details(self) -> List[Dict[str, Any]]:
         details = []
         for c in self.credentials:
-            def format_datetime(dt: Optional[datetime]) -> Optional[str]:
-                return dt.isoformat() if dt else None
-
-            expiry_str = "N/A"
-            if c.credentials.expiry:
+            def format_datetime_to_local(dt: Optional[datetime]) -> str:
+                if not dt:
+                    return "N/A"
                 try:
-                    local_expiry = c.credentials.expiry.astimezone()
-                    expiry_str = local_expiry.strftime("%Y-%m-%d %H:%M:%S %Z")
+                    # 转换为本地时间
+                    local_dt = dt.astimezone()
+                    return local_dt.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
-                    expiry_str = str(c.credentials.expiry)
-            
+                    return str(dt)
+
             details.append({
                 "id": c.id,
                 "email": sanitize_email(c.email),
                 "project_id": sanitize_project_id(c.project_id),
                 "status": c.status,
                 "is_available": c.is_available(),
-                "expiry": expiry_str,
+                "expiry": format_datetime_to_local(c.credentials.expiry),
                 "usage_count": c.usage_count,
-                "created_at": format_datetime(c.created_at),
-                "last_used_at": format_datetime(c.last_used_at),
-                "last_refreshed_at": format_datetime(c.last_refreshed_at),
-                "rate_limited_until": format_datetime(c.rate_limited_until),
-                "failed_at": format_datetime(c.failed_at),
+                "created_at": format_datetime_to_local(c.created_at),
+                "last_used_at": format_datetime_to_local(c.last_used_at),
+                "last_refreshed_at": format_datetime_to_local(c.last_refreshed_at),
+                "rate_limited_until": format_datetime_to_local(c.rate_limited_until),
+                "failed_at": format_datetime_to_local(c.failed_at),
                 "failure_reason": c.failure_reason,
             })
         return details
+
+    async def delete_credential(self, credential_id: str) -> Tuple[bool, str]:
+        """
+        从池中删除一个凭据。
+        """
+        async with self.lock:
+            original_len = len(self.credentials)
+            
+            cred_to_delete = None
+            for c in self.credentials:
+                if c.id == credential_id:
+                    cred_to_delete = c
+                    break
+            
+            if not cred_to_delete:
+                logger.warning(f"[CredManager] Attempted to delete non-existent credential ID: {credential_id}")
+                return False, "credential_not_found"
+
+            self.credentials.remove(cred_to_delete)
+            
+            # 重新生成 ID 以确保它们是连续的
+            for i, c in enumerate(self.credentials):
+                c.id = f"cred-{i}"
+
+            if len(self.credentials) < original_len:
+                logger.info(f"[CredManager] Deleted credential {credential_id} for user {sanitize_email(cred_to_delete.email)}. New count: {len(self.credentials)}")
+                self._persist_current_state()
+                return True, "credential_deleted"
+            else:
+                # 这在理论上不应该发生
+                logger.error(f"[CredManager] Failed to delete credential {credential_id} despite finding it.")
+                return False, "deletion_failed_unexpectedly"
