@@ -84,10 +84,13 @@ class ManagedCredential:
             CredentialStatus.EXPIRED
         ]
         if is_in_expiry_check_scope and self.credentials.expiry:
+            # 确保expiry有时区信息
+            expiry_time = self.credentials.expiry
+            if expiry_time.tzinfo is None:
+                expiry_time = expiry_time.replace(tzinfo=timezone.utc)
             random_expiry_window = timedelta(minutes=random.randint(1, 10))
             # 如果凭据将在随机窗口内过期（这也包含了已经过期的情况），则刷新。
-            if self.credentials.expiry.replace(tzinfo=timezone.utc) < now + random_expiry_window:
-                return True
+            return expiry_time < now + random_expiry_window
         
         return False
 
