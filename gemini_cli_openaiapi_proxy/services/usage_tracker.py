@@ -104,6 +104,12 @@ class UsageTracker:
                 return obj
             return custom_serializer(model_summary_stats)
 
+    async def reset_usage(self):
+        """重置所有用量统计数据。"""
+        async with self.lock:
+            self.usage_data.clear()
+            logger.info("Usage statistics have been reset.")
+
     async def check_request_allowed(
         self, auth_key: str, cred_id: str, model_name: str
     ) -> Tuple[bool, str]:

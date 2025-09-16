@@ -153,6 +153,7 @@ async def get_admin_ui(
 
         <h4>Actions</h4>
         <a href="/oauth2/login" target="_blank" class="button" style="font-weight: bold; padding: 6px 12px;">Start Authentication</a>
+        <span onclick="resetUsageStats()" class="button" style="padding: 6px 12px;">Reset Usage Stats</span>
 
         <h4>Endpoints</h4>
         <ul>
@@ -161,6 +162,28 @@ async def get_admin_ui(
         </ul>
 
         <script>
+            function resetUsageStats() {{
+                if (confirm("Are you sure you want to reset all usage statistics? This action cannot be undone.")) {{
+                    fetch('/admin/usage/reset', {{
+                        method: 'POST',
+                    }})
+                    .then(response => {{
+                        if (response.ok) {{
+                            alert('Usage statistics have been reset successfully.');
+                            window.location.reload();
+                        }} else {{
+                            response.json().then(data => {{
+                                alert(`Failed to reset usage stats: ${{data.detail || "Unknown error"}}`);
+                            }});
+                        }}
+                    }})
+                    .catch(error => {{
+                        console.error('Error:', error);
+                        alert('An error occurred while trying to reset usage statistics.');
+                    }});
+                }}
+            }}
+
             function deleteCredential(credentialId) {{
                 if (confirm(`Are you sure you want to delete credential: ${{credentialId}}?`)) {{
                     fetch(`/admin/credentials/${{credentialId}}`, {{
@@ -275,6 +298,12 @@ async def get_usage_status(usage_tracker: UsageTracker = Depends(get_usage_track
     """获取聚合后的用量统计，不暴露任何敏感分组信息。"""
     summary = await usage_tracker.get_aggregated_usage_summary()
     return JSONResponse(content=summary)
+
+@router.post("/admin/usage/reset", summary="Reset all usage statistics")
+async def reset_usage_stats(usage_tracker: UsageTracker = Depends(get_usage_tracker)):
+    """重置所有用量统计数据。"""
+    await usage_tracker.reset_usage()
+    return JSONResponse(content={"status": "success", "message": "Usage statistics have been reset."})
 
 @router.get("/admin/credentials/{credential_id}/check")
 async def force_credential_health_check(
