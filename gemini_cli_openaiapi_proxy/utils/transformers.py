@@ -34,20 +34,52 @@ def _map_finish_reason(gemini_reason: str) -> Optional[str]:
 def gemini_to_openai_response(gemini_response: Dict[str, Any], model: str) -> Dict[str, Any]:
     """将 Gemini 的非流式响应转换为 OpenAI 聊天补全响应格式。"""
     choices = []
-    for candidate in gemini_response.get("candidates", []):
-        content = "".join(part.get("text", "") for part in candidate.get("content", {}).get("parts", []))
+    
+    # 修正: 从 gemini_response['response']['candidates'] 获取
+    response_obj = gemini_response.get("response", {})
+    
+    for candidate in response_obj.get("candidates", []):
+        # 关键修复: 过滤掉 Gemini 返回的 "thought" 部分。
+        # 背景: Gemini API 可能会在返回最终答案前，先输出一个包含其 "思考过程" 的 part，其 `thought` 字段为 true。
+        # 问题: 如果不加过滤，这个思考过程会和最终答案拼接在一起，导致客户端（如 ChatGPT Next Web）收到非预期的内容而报错。
+        # 方案: 我们只选择那些 `thought` 字段不存在或为 False 的 part，以确保只包含最终的模型输出。
+        text_parts = [
+            part.get("text", "")
+            for part in candidate.get("content", {}).get("parts", [])
+            if not part.get("thought")
+        ]
+        content = "".join(text_parts)
+        
         message = {"role": "assistant", "content": content}
         choices.append({
             "index": candidate.get("index", 0),
             "message": message,
             "finish_reason": _map_finish_reason(candidate.get("finishReason")),
         })
-    
+
+    # 如果 choices 为空，则根据 promptFeedback 创建一个默认的 choice
+    if not choices:
+        finish_reason = None
+        prompt_feedback = response_obj.get("promptFeedback") # 修正: 从 response_obj 获取
+        if prompt_feedback:
+            # 从 blockReason 映射 finish_reason
+            block_reason = prompt_feedback.get("blockReason")
+            if block_reason == "SAFETY":
+                finish_reason = "content_filter"
+            # 可以根据需要添加其他 blockReason 的映射
+
+        choices.append({
+            "index": 0,
+            "message": {"role": "assistant", "content": None},
+            "finish_reason": finish_reason,
+        })
+
     # 模拟 usage 对象
+    usage_metadata = response_obj.get("usageMetadata", {}) # 修正: 从 response_obj 获取
     usage = {
-        "prompt_tokens": gemini_response.get("usageMetadata", {}).get("promptTokenCount", 0),
-        "completion_tokens": gemini_response.get("usageMetadata", {}).get("candidatesTokenCount", 0),
-        "total_tokens": gemini_response.get("usageMetadata", {}).get("totalTokenCount", 0),
+        "prompt_tokens": usage_metadata.get("promptTokenCount", 0),
+        "completion_tokens": usage_metadata.get("candidatesTokenCount", 0),
+        "total_tokens": usage_metadata.get("totalTokenCount", 0),
     }
 
     return {
@@ -66,11 +98,14 @@ def gemini_to_openai_stream_chunk(gemini_chunk: Dict[str, Any], model: str, resp
     for candidate in response_obj.get("candidates", []):
         delta = {}
         
-        # 过滤掉 "thought" part
+        # 关键修复: 统一并加固对 "thought" 部分的过滤逻辑。
+        # 背景: 与非流式响应一样，流式响应的每个数据块（chunk）也可能包含 `thought` part。
+        # 问题: 虽然流式传输对 `thought` 有天然的容错能力（客户端会忽略空块），但保持与非流式代码一致的、更健壮的过滤逻辑是良好的工程实践。
+        # 方案: 采用 `not part.get("thought")` 的方式，可以正确处理 `thought` 字段不存在、为 None 或为 False 的所有情况。
         text_parts = [
             part.get("text", "")
             for part in candidate.get("content", {}).get("parts", [])
-            if "thought" not in part
+            if not part.get("thought")
         ]
         content = "".join(text_parts)
 
@@ -99,34 +134,42 @@ def gemini_to_openai_stream_chunk(gemini_chunk: Dict[str, Any], model: str, resp
 
 def openai_to_gemini_request(openai_request: Dict[str, Any]) -> Dict[str, Any]:
     """
-    将 OpenAI 格式的聊天补全请求转换为 Google Gemini API 所需的请求格式。
+    将 OpenAI 格式的聊天补全请求转换为 Google Gemini API 所需的请求格式，并合并连续的用户消息。
     """
     contents = []
     system_instruction = None
 
     for message in openai_request.get("messages", []):
         role = message.get("role")
-        if role == "assistant":
-            role = "model"
-        elif role == "system":
-            system_instruction = {"parts": [{"text": message.get("content", "")}]}
+        
+        if role == "system":
+            system_content = message.get("content", "")
+            if isinstance(system_content, str):
+                system_instruction = {"parts": [{"text": system_content}]}
             continue
 
+        gemini_role = "model" if role == "assistant" else "user"
+
         content = message.get("content")
-        parts = []
+        current_parts = []
         if isinstance(content, str):
-            parts.append({"text": content})
+            current_parts.append({"text": content})
         elif isinstance(content, list):
             for part in content:
                 if part.get("type") == "text":
-                    parts.append({"text": part.get("text", "")})
+                    current_parts.append({"text": part.get("text", "")})
                 elif part.get("type") == "image_url":
                     image_url = part.get("image_url", {}).get("url", "")
                     match = re.match(r"data:(?P<mime_type>.*?);base64,(?P<data>.*)", image_url)
                     if match:
-                        parts.append({"inlineData": {"mimeType": match.group("mime_type"), "data": match.group("data")}})
-
-        contents.append({"role": role, "parts": parts})
+                        current_parts.append({"inlineData": {"mimeType": match.group("mime_type"), "data": match.group("data")}})
+        
+        if contents and contents[-1]["role"] == "user" and gemini_role == "user":
+            if contents[-1]["parts"] and isinstance(contents[-1]["parts"][-1].get("text"), str):
+                 contents[-1]["parts"].append({"text": "\n"})
+            contents[-1]["parts"].extend(current_parts)
+        else:
+            contents.append({"role": gemini_role, "parts": current_parts})
 
     generation_config = {}
     if "temperature" in openai_request:

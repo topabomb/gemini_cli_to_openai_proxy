@@ -206,14 +206,17 @@ class GoogleApiClient:
 
                 # 处理成功响应
                 response_data = await resp.aread()
+                logger.debug(f"[ApiClient] Raw Gemini Response: {response_data.decode('utf-8')}")
                 try:
                     json_data = json.loads(response_data)
+                    logger.debug(f"[ApiClient] Parsed Gemini JSON: {json_data}")
                     response_obj = json_data.get("response", {})
                     usage_metadata = response_obj.get("usageMetadata")
                     await self.usage_tracker.record_successful_request(auth_key, managed_cred.id, model, usage_metadata or {})
                     
                     if compat_openai:
                         openai_response = gemini_to_openai_response(json_data, model)
+                        logger.debug(f"[ApiClient] Final OpenAI-compatible Response: {openai_response}")
                         return JSONResponse(content=openai_response, status_code=200)
                 except json.JSONDecodeError:
                     logger.warning("[ApiClient] Failed to parse non-stream response for usage tracking.")
