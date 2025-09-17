@@ -18,8 +18,8 @@ import oauthlib.oauth2.rfc6749.parameters
 
 from ...core.config import CLIENT_ID, CLIENT_SECRET, SCOPES
 from ...services.credential_manager import CredentialManager
-from ...services.usage_tracker import UsageTracker, _format_human_readable
-from ..dependencies import get_credential_manager, get_usage_tracker
+from ...services.usage_hooks import UsageStatsHook, _format_human_readable
+from ..dependencies import get_credential_manager, get_usage_stats_hook
 from ..security import verify_admin_access
 from ...utils.credential_tools import AddCredentialRequest, build_credentials_from_simple
 
@@ -31,7 +31,7 @@ router = APIRouter(
 @router.get("/", response_class=HTMLResponse)
 async def get_admin_ui(
     cred_manager: CredentialManager = Depends(get_credential_manager),
-    usage_tracker: UsageTracker = Depends(get_usage_tracker)
+    usage_stats_hook: UsageStatsHook = Depends(get_usage_stats_hook)
 ):
     """提供一个包含实时统计信息的 HTML 管理界面。"""
     
@@ -66,7 +66,7 @@ async def get_admin_ui(
             """
 
     # --- 生成用量表格 ---
-    usage_summary = await usage_tracker.get_aggregated_usage_summary()
+    usage_summary = await usage_stats_hook.get_aggregated_usage_summary()
     usage_table_rows = ""
     if not usage_summary:
         usage_table_rows = '<tr><td colspan="5" style="text-align: center;">No usage data recorded yet.</td></tr>'
@@ -294,15 +294,15 @@ async def get_credentials_status(cred_manager: CredentialManager = Depends(get_c
     return JSONResponse(content=details)
 
 @router.get("/admin/usage")
-async def get_usage_status(usage_tracker: UsageTracker = Depends(get_usage_tracker)):
+async def get_usage_status(usage_stats_hook: UsageStatsHook = Depends(get_usage_stats_hook)):
     """获取聚合后的用量统计，不暴露任何敏感分组信息。"""
-    summary = await usage_tracker.get_aggregated_usage_summary()
+    summary = await usage_stats_hook.get_aggregated_usage_summary()
     return JSONResponse(content=summary)
 
 @router.post("/admin/usage/reset", summary="Reset all usage statistics")
-async def reset_usage_stats(usage_tracker: UsageTracker = Depends(get_usage_tracker)):
+async def reset_usage_stats(usage_stats_hook: UsageStatsHook = Depends(get_usage_stats_hook)):
     """重置所有用量统计数据。"""
-    await usage_tracker.reset_usage()
+    await usage_stats_hook.reset_usage()
     return JSONResponse(content={"status": "success", "message": "Usage statistics have been reset."})
 
 @router.get("/admin/credentials/{credential_id}/check")

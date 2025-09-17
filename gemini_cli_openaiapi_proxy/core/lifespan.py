@@ -13,9 +13,10 @@ from fastapi import FastAPI
 
 from ..services.credential_manager import CredentialManager
 from ..services.google_client import GoogleApiClient
-from ..services.usage_tracker import UsageTracker
 from ..services.state_tracker import SystemStateTracker
 from ..services.health_checker import HealthCheckService
+from ..core.hooks import HookManager
+from ..services.usage_hooks import create_usage_hooks, UsageStatsHook
 from ..core.types import AtomicHealthCheck
 
 @asynccontextmanager
@@ -38,23 +39,35 @@ async def lifespan(app: FastAPI):
     # 2. 创建 cred_manager，此时 health_checker 是空的
     cred_manager = CredentialManager(settings, http_client, system_tracker, health_checker)
     
-    # 3. 创建依赖 cred_manager 的服务
-    usage_tracker = UsageTracker(cred_manager)
-    google_api_client = GoogleApiClient(settings, cred_manager, http_client, usage_tracker)
+    # 3. 创建 Hook 系统
+    hook_manager = HookManager()
     
-    # 4. 现在 google_api_client 存在了，获取它的检查函数并设置给 health_checker
+    # 4. 创建用量统计 Hook
+    start_hook, end_hook, usage_stats_hook = create_usage_hooks(cred_manager)
+    hook_manager.add_start_hook(start_hook)
+    hook_manager.add_end_hook(end_hook)
+    
+    # 5. 创建 PolicyEnforceHook 实例（用于 GoogleApiClient 构造函数）
+    from ..services.usage_hooks import PolicyEnforceHook
+    policy_enforce_hook = PolicyEnforceHook()
+    
+    # 6. 创建依赖 cred_manager 和 hook_manager 的服务
+    google_api_client = GoogleApiClient(settings, cred_manager, http_client, hook_manager, usage_stats_hook, policy_enforce_hook)
+    
+    # 6. 现在 google_api_client 存在了，获取它的检查函数并设置给 health_checker
     checkers = [
         google_api_client.check_simple_model_call,
         google_api_client._check_token_counter,
     ]
     health_checker.set_checkers(cast(List[AtomicHealthCheck], checkers))
 
-    # 5. 将所有最终的服务实例存入 app.state
+    # 7. 将所有最终的服务实例存入 app.state
     app.state.http_client = http_client
     app.state.system_tracker = system_tracker
     app.state.health_checker = health_checker
     app.state.credential_manager = cred_manager
-    app.state.usage_tracker = usage_tracker
+    app.state.hook_manager = hook_manager
+    app.state.usage_stats_hook = usage_stats_hook
     app.state.google_api_client = google_api_client
     
     # 3. 加载持久化凭据并检查
@@ -90,7 +103,7 @@ async def lifespan(app: FastAPI):
     # 4. 启动后台任务
     cred_manager.start_background_tasks()
     if settings["usage_logging"]["enabled"]:
-        usage_tracker.start_logging_task(settings["usage_logging"]["interval_sec"])
+        usage_stats_hook.start_logging_task(settings["usage_logging"]["interval_sec"])
         
     logging.info("Application startup complete.")
     
@@ -102,7 +115,7 @@ async def lifespan(app: FastAPI):
     # 1. 停止后台任务
     app.state.credential_manager.stop_background_tasks()
     if app.state.settings["usage_logging"]["enabled"]:
-        app.state.usage_tracker.stop_logging_task()
+        app.state.usage_stats_hook.stop_logging_task()
         
     # 2. 关闭 httpx 客户端
     await app.state.http_client.aclose()
