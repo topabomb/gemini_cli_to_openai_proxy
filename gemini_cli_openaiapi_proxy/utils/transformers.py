@@ -9,6 +9,8 @@ import logging
 import time
 import uuid
 import re
+import httpx
+import mimetypes
 from typing import Dict, Any, List, Optional
 
 from ..core.models import (
@@ -20,59 +22,71 @@ from ..core.models import (
 
 # ===== Gemini to OpenAI 转换 =====
 
-def _map_finish_reason(gemini_reason: str) -> Optional[str]:
+def _map_finish_reason(gemini_reason: Optional[str]) -> Optional[str]:
     """将 Gemini 的结束原因映射为 OpenAI 的结束原因。"""
+    # 在流式传输中，中间的块没有 finishReason，所以 gemini_reason 可能为 None
+    if not gemini_reason:
+        return None
+        
     if gemini_reason == "STOP":
         return "stop"
     elif gemini_reason == "MAX_TOKENS":
         return "length"
-    elif gemini_reason in ["SAFETY", "RECITATION"]:
+    elif gemini_reason in ["SAFETY", "RECITATION", "BLOCKED", "PROHIBITED"]:
         return "content_filter"
     else:
+        # 仅当收到一个非空但不认识的原因时才发出警告
+        logging.warning(f"Unknown Gemini finish reason: {gemini_reason}, mapping to None")
         return None
 
-def gemini_to_openai_response(gemini_response: Dict[str, Any], model: str) -> Dict[str, Any]:
-    """将 Gemini 的非流式响应转换为 OpenAI 聊天补全响应格式。"""
+def gemini_to_openai_response(gemini_response: Dict[str, Any], model: str, filter_thoughts: bool = True) -> Dict[str, Any]:
+    """将 Gemini 的非流式响应转换为 OpenAI 聊天补全响应格式。
+
+    Args:
+        gemini_response: Gemini API 响应
+        model: 模型名称
+        filter_thoughts: 是否过滤 'thought' 部分，默认 True 以兼容旧客户端
+    """
     choices = []
-    
+
     # 修正: 从 gemini_response['response']['candidates'] 获取
     response_obj = gemini_response.get("response", {})
-    
+
     for candidate in response_obj.get("candidates", []):
-        # 关键修复: 过滤掉 Gemini 返回的 "thought" 部分。
-        # 背景: Gemini API 可能会在返回最终答案前，先输出一个包含其 "思考过程" 的 part，其 `thought` 字段为 true。
-        # 问题: 如果不加过滤，这个思考过程会和最终答案拼接在一起，导致客户端（如 ChatGPT Next Web）收到非预期的内容而报错。
-        # 方案: 我们只选择那些 `thought` 字段不存在或为 False 的 part，以确保只包含最终的模型输出。
-        text_parts = [
-            part.get("text", "")
-            for part in candidate.get("content", {}).get("parts", [])
-            if not part.get("thought")
-        ]
-        content = "".join(text_parts)
-        
+        content = ""
+        reasoning_content = ""
+
+        for part in candidate.get("content", {}).get("parts", []):
+            text = part.get("text", "")
+            is_thought = part.get("thought", False)
+
+            if filter_thoughts:
+                # 增强检测：只过滤 thought=True 且有内容的
+                if is_thought and text.strip():
+                    logging.info(f"Filtering thought part in candidate {candidate.get('index', 0)} for model {model}")
+                    continue
+                content += text
+            else:
+                # 提取 thought 为 reasoning_content
+                if is_thought and text.strip():
+                    reasoning_content += text
+                else:
+                    content += text
+
         message = {"role": "assistant", "content": content}
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
+
         choices.append({
             "index": candidate.get("index", 0),
             "message": message,
             "finish_reason": _map_finish_reason(candidate.get("finishReason")),
         })
 
-    # 如果 choices 为空，则根据 promptFeedback 创建一个默认的 choice
+    # 如果 choices 为空，返回错误而不是创建默认 choice
     if not choices:
-        finish_reason = None
-        prompt_feedback = response_obj.get("promptFeedback") # 修正: 从 response_obj 获取
-        if prompt_feedback:
-            # 从 blockReason 映射 finish_reason
-            block_reason = prompt_feedback.get("blockReason")
-            if block_reason == "SAFETY":
-                finish_reason = "content_filter"
-            # 可以根据需要添加其他 blockReason 的映射
-
-        choices.append({
-            "index": 0,
-            "message": {"role": "assistant", "content": None},
-            "finish_reason": finish_reason,
-        })
+        logging.error(f"No valid candidates in Gemini response for model {model}. Response: {gemini_response}")
+        raise ValueError("No valid candidates in Gemini response")
 
     # 模拟 usage 对象
     usage_metadata = response_obj.get("usageMetadata", {}) # 修正: 从 response_obj 获取
@@ -91,30 +105,52 @@ def gemini_to_openai_response(gemini_response: Dict[str, Any], model: str) -> Di
         "usage": usage,
     }
 
-def gemini_to_openai_stream_chunk(gemini_chunk: Dict[str, Any], model: str, response_id: str, is_first_chunk: bool) -> Dict[str, Any]:
-    """将 Gemini 的流式块转换为 OpenAI 的流式块。"""
+def gemini_to_openai_stream_chunk(gemini_chunk: Dict[str, Any], model: str, response_id: str, is_first_chunk: bool, filter_thoughts: bool = True) -> Dict[str, Any]:
+    """将 Gemini 的流式块转换为 OpenAI 的流式块。
+
+    Args:
+        gemini_chunk: Gemini 流式块
+        model: 模型名称
+        response_id: 响应 ID
+        is_first_chunk: 是否为第一个块
+        filter_thoughts: 是否过滤 'thought' 部分，默认 True
+    """
     choices = []
     response_obj = gemini_chunk.get("response", {})
     for candidate in response_obj.get("candidates", []):
         delta = {}
-        
-        # 关键修复: 统一并加固对 "thought" 部分的过滤逻辑。
-        # 背景: 与非流式响应一样，流式响应的每个数据块（chunk）也可能包含 `thought` part。
-        # 问题: 虽然流式传输对 `thought` 有天然的容错能力（客户端会忽略空块），但保持与非流式代码一致的、更健壮的过滤逻辑是良好的工程实践。
-        # 方案: 采用 `not part.get("thought")` 的方式，可以正确处理 `thought` 字段不存在、为 None 或为 False 的所有情况。
-        text_parts = [
-            part.get("text", "")
-            for part in candidate.get("content", {}).get("parts", [])
-            if not part.get("thought")
-        ]
-        content = "".join(text_parts)
+        content = ""
+        reasoning_content = ""
+
+        for part in candidate.get("content", {}).get("parts", []):
+            text = part.get("text", "")
+            is_thought = part.get("thought", False)
+
+            if filter_thoughts:
+                # 增强检测：只过滤 thought=True 且有内容的
+                if is_thought and text.strip():
+                    logging.info(f"Filtering thought part in stream chunk for candidate {candidate.get('index', 0)} model {model}")
+                    continue
+                content += text
+            else:
+                # 提取 thought 为 reasoning_content
+                if is_thought and text.strip():
+                    reasoning_content += text
+                else:
+                    content += text
 
         if content:
             delta["content"] = content
-        
+        if reasoning_content:
+            delta["reasoning_content"] = reasoning_content
+
         # 在流的第一个块中设置角色
         if is_first_chunk:
             delta["role"] = "assistant"
+
+        # 过滤空 delta
+        if not delta and not _map_finish_reason(candidate.get("finishReason")):
+            continue
 
         choices.append({
             "index": candidate.get("index", 0),
@@ -132,20 +168,31 @@ def gemini_to_openai_stream_chunk(gemini_chunk: Dict[str, Any], model: str, resp
 
 # ===== OpenAI to Gemini 转换 =====
 
-def openai_to_gemini_request(openai_request: Dict[str, Any]) -> Dict[str, Any]:
+async def openai_to_gemini_request(openai_request: Dict[str, Any]) -> Dict[str, Any]:
     """
     将 OpenAI 格式的聊天补全请求转换为 Google Gemini API 所需的请求格式，并合并连续的用户消息。
     """
+    model = openai_request.get("model", "")
+    from ..core.models import SUPPORTED_MODELS
+    supported_model_names = [m["name"].replace("models/", "") for m in SUPPORTED_MODELS]
+    if model not in supported_model_names:
+        logging.error(f"Unsupported model: {model}. Supported models: {supported_model_names}")
+        raise ValueError(f"Unsupported model: {model}")
     contents = []
     system_instruction = None
 
     for message in openai_request.get("messages", []):
         role = message.get("role")
-        
+
         if role == "system":
             system_content = message.get("content", "")
             if isinstance(system_content, str):
-                system_instruction = {"parts": [{"text": system_content}]}
+                if system_instruction:
+                    # 如果已有 system_instruction，合并内容
+                    system_instruction["parts"][0]["text"] += "\n---\n" + system_content
+                    logging.info("Merged multiple system messages")
+                else:
+                    system_instruction = {"parts": [{"text": system_content}]}
             continue
 
         gemini_role = "model" if role == "assistant" else "user"
@@ -160,9 +207,41 @@ def openai_to_gemini_request(openai_request: Dict[str, Any]) -> Dict[str, Any]:
                     current_parts.append({"text": part.get("text", "")})
                 elif part.get("type") == "image_url":
                     image_url = part.get("image_url", {}).get("url", "")
-                    match = re.match(r"data:(?P<mime_type>.*?);base64,(?P<data>.*)", image_url)
-                    if match:
-                        current_parts.append({"inlineData": {"mimeType": match.group("mime_type"), "data": match.group("data")}})
+                    
+                    if image_url.startswith("data:"):
+                        # 加固的正则表达式，允许MIME类型和base64声明之间有空格
+                        match = re.match(r"data:\s*(?P<mime_type>.*?)\s*;\s*base64\s*,(?P<data>.*)", image_url, re.DOTALL)
+                        if match:
+                            current_parts.append({"inlineData": {"mimeType": match.group("mime_type"), "data": match.group("data")}})
+                        else:
+                            # 从记录警告升级为抛出异常，为用户提供明确的反馈
+                            raise ValueError(f"Invalid base64 image URL format: {image_url[:100]}...")
+                    
+                    elif image_url.startswith("http://") or image_url.startswith("https://"):
+                        try:
+                            async with httpx.AsyncClient() as client:
+                                response = await client.get(image_url, follow_redirects=True, timeout=20.0)
+                                response.raise_for_status()
+                            
+                            image_data = response.content
+                            # 从响应头获取 mime_type，如果失败则从 URL 猜测
+                            mime_type = response.headers.get("Content-Type")
+                            if not mime_type:
+                                mime_type = mimetypes.guess_type(image_url)[0]
+                            
+                            if not mime_type:
+                                raise ValueError(f"Could not determine mime type for image URL: {image_url}")
+
+                            encoded_data = base64.b64encode(image_data).decode("utf-8")
+                            current_parts.append({"inlineData": {"mimeType": mime_type, "data": encoded_data}})
+
+                        except httpx.HTTPStatusError as e:
+                            raise ValueError(f"Failed to download image from {image_url}. Status: {e.response.status_code}")
+                        except Exception as e:
+                            raise ValueError(f"An error occurred while processing image URL {image_url}: {e}")
+                    
+                    else:
+                        raise ValueError(f"Unsupported image URL format: {image_url[:100]}...")
         
         if contents and contents[-1]["role"] == "user" and gemini_role == "user":
             if contents[-1]["parts"] and isinstance(contents[-1]["parts"][-1].get("text"), str):
@@ -183,10 +262,45 @@ def openai_to_gemini_request(openai_request: Dict[str, Any]) -> Dict[str, Any]:
     if "n" in openai_request:
         generation_config["candidateCount"] = openai_request["n"]
 
+    # 添加警告日志对于不完全映射的参数
+    if "frequency_penalty" in openai_request:
+        logging.warning("frequency_penalty is not fully supported in Gemini, using approximate mapping")
+    if "presence_penalty" in openai_request:
+        logging.warning("presence_penalty is not fully supported in Gemini, using approximate mapping")
+
+    # 兼容 OpenAI 的 JSON 模式
+    if openai_request.get("response_format", {}).get("type") == "json_object":
+        generation_config["response_mime_type"] = "application/json"
+        logging.info("JSON mode enabled for Gemini request by mapping response_format.")
+
     request_payload = {
         "contents": contents,
         "generationConfig": generation_config,
     }
+
+    # 兼容 OpenAI 的 tool_choice
+    tool_choice = openai_request.get("tool_choice")
+    if tool_choice:
+        function_calling_config = {}
+        if isinstance(tool_choice, str):
+            if tool_choice == "none":
+                function_calling_config["mode"] = "NONE"
+            elif tool_choice == "auto":
+                function_calling_config["mode"] = "AUTO"
+            elif tool_choice == "required":
+                # "required" 在 OpenAI 中意味着必须调用一个工具，等同于 Gemini 的 "ANY"
+                function_calling_config["mode"] = "ANY"
+        elif isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+            function_name = tool_choice.get("function", {}).get("name")
+            if function_name:
+                # 强制调用特定函数
+                function_calling_config["mode"] = "ANY"
+                function_calling_config["allowed_function_names"] = [function_name]
+
+        if function_calling_config:
+            # Gemini 的 toolConfig 是一个顶层参数
+            request_payload["toolConfig"] = {"functionCallingConfig": function_calling_config}
+            logging.info(f"Tool choice mapped to Gemini's toolConfig: {function_calling_config}")
 
     if system_instruction:
         request_payload["systemInstruction"] = system_instruction

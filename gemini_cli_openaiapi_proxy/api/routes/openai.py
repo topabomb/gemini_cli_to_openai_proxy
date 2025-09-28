@@ -61,7 +61,7 @@ async def chat_completions(
         openai_request = await request.json()
         is_streaming = openai_request.get("stream", False)
 
-        gemini_payload = openai_to_gemini_request(openai_request)
+        gemini_payload = await openai_to_gemini_request(openai_request)
 
         return await client.send_gemini_request(
             auth_key=api_key,
@@ -69,6 +69,12 @@ async def chat_completions(
             gemini_request=gemini_payload["request"],
             is_streaming=is_streaming,
             compat_openai=True
+        )
+    except ValueError as e:
+        logger.error(f"OpenAI compatible API error: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": str(e), "type": "invalid_request_error"}}
         )
     except Exception as e:
         logger.error(f"OpenAI compatible API error: {e}", exc_info=True)

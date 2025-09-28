@@ -244,9 +244,13 @@ class GoogleApiClient:
                     ctx.usage_metadata = usage_metadata or {}
                     
                     if compat_openai:
-                        openai_response = gemini_to_openai_response(json_data, model)
-                        logger.debug(f"[ApiClient] Final OpenAI-compatible Response: {openai_response}")
-                        return JSONResponse(content=openai_response, status_code=200)
+                        try:
+                            openai_response = gemini_to_openai_response(json_data, model, filter_thoughts=True)
+                            logger.debug(f"[ApiClient] Final OpenAI-compatible Response: {openai_response}")
+                            return JSONResponse(content=openai_response, status_code=200)
+                        except ValueError as e:
+                            logger.error(f"[ApiClient] Failed to convert Gemini response: {e}")
+                            return self._create_error_response("Failed to process Gemini response", 500, is_streaming=False)
                 except json.JSONDecodeError:
                     logger.warning("[ApiClient] Failed to parse non-stream response for usage tracking.")
                     ctx.usage_metadata = {}
@@ -366,7 +370,7 @@ class GoogleApiClient:
                                         usage_metadata = response_obj["usageMetadata"]
                                     
                                     if compat_openai:
-                                        openai_chunk = gemini_to_openai_stream_chunk(obj, model, response_id, is_first_chunk)
+                                        openai_chunk = gemini_to_openai_stream_chunk(obj, model, response_id, is_first_chunk, filter_thoughts=True)
                                         yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
                                         if is_first_chunk:
                                             is_first_chunk = False
