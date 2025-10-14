@@ -10,23 +10,10 @@
 
 BASE_MODELS = [
     {
-        "name": "models/gemini-2.5-pro-preview-05-06",
+        "name": "models/gemini-flash-latest",
         "version": "001",
-        "displayName": "Gemini 2.5 Pro Preview 05-06",
-        "description": "Preview version of Gemini 2.5 Pro from May 6th",
-        "inputTokenLimit": 1048576,
-        "outputTokenLimit": 65535,
-        "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
-        "temperature": 1.0,
-        "maxTemperature": 2.0,
-        "topP": 0.95,
-        "topK": 64,
-    },
-    {
-        "name": "models/gemini-2.5-pro",
-        "version": "001",
-        "displayName": "Gemini 2.5 Pro",
-        "description": "Advanced multimodal model with enhanced capabilities",
+        "displayName": "Gemini Flash Latest",
+        "description": "Fast and efficient multimodal model with latest improvements",
         "inputTokenLimit": 1048576,
         "outputTokenLimit": 65535,
         "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
@@ -48,6 +35,20 @@ BASE_MODELS = [
         "topP": 0.95,
         "topK": 64,
     },
+    {
+        "name": "models/gemini-2.5-pro",
+        "version": "001",
+        "displayName": "Gemini 2.5 Pro",
+        "description": "Advanced multimodal model with enhanced capabilities",
+        "inputTokenLimit": 1048576,
+        "outputTokenLimit": 65535,
+        "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+        "temperature": 1.0,
+        "maxTemperature": 2.0,
+        "topP": 0.95,
+        "topK": 64,
+    },
+    
 ]
 
 
