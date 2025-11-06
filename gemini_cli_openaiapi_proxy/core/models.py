@@ -10,9 +10,22 @@
 
 BASE_MODELS = [
     {
-        "name": "models/gemini-flash-latest",
+        "name": "models/gemini-3-pro-preview-11-2025",
         "version": "001",
-        "displayName": "Gemini Flash Latest",
+        "displayName": "gemini-3-pro-preview-11-2025",
+        "description": "Advanced multimodal model with enhanced capabilities",
+        "inputTokenLimit": 1048576,
+        "outputTokenLimit": 65535,
+        "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+        "temperature": 1.0,
+        "maxTemperature": 2.0,
+        "topP": 0.95,
+        "topK": 64,
+    },
+    {
+        "name": "models/gemini-2.5-flash-preview-09-2025",
+        "version": "001",
+        "displayName": "gemini-2.5-flash-preview-09-2025",
         "description": "Fast and efficient multimodal model with latest improvements",
         "inputTokenLimit": 1048576,
         "outputTokenLimit": 65535,
